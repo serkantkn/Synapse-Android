@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Synapse</string>
+    <string name="accessibility_service_description">Synapse Control: Mac üzerinden telefonunuza dokunma, kaydırma ve sistem düğmelerini kullanma (Geri, Ana Ekran) komutları göndermenizi sağlar. Bu servis uzaktan kontrol özelliği için zorunludur.</string>
+</resources>
