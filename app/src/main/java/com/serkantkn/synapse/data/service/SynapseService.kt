@@ -95,7 +95,8 @@ class SynapseService : Service() {
             // Android 14+ requires registering a callback before starting the capture
             mediaProjection?.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
-                    stopScreenMirroring()
+                    // Projection ended (by us or by the user via system UI): it can't be reused.
+                    onProjectionStopped()
                 }
             }, Handler(Looper.getMainLooper()))
 
@@ -183,12 +184,30 @@ class SynapseService : Service() {
         keyPair = CryptoManager.generateKeyPair()
         
         transferManager.onDisconnect = {
-            Log.d(TAG, "🔌 Connection lost detected by TCP manager")
-            // Save the device ID before cleaning up, so we can auto-reconnect
-            lastConnectedDeviceId = connectedDevice.value?.id
-            disconnect()
-            // Auto-restart discovery (will auto-reconnect if device is found)
-            startDiscovery()
+            // Invoked on the socket reader thread: hop to the main thread before touching state.
+            serviceScope.launch {
+                Log.d(TAG, "🔌 Connection lost detected by TCP manager")
+                // Save the device ID before cleaning up, so we can auto-reconnect
+                lastConnectedDeviceId = connectedDevice.value?.id
+                disconnect()
+                // Auto-restart discovery (will auto-reconnect if device is found)
+                startDiscovery()
+            }
+        }
+
+        // Derive the session key on the reader thread as soon as HANDSHAKE_RESPONSE arrives,
+        // so an encrypted frame sent right after the response is decrypted correctly.
+        transferManager.handshakeKeyProvider = { packet ->
+            val theirPublicKeyStr = packet.payload["public_key"] as? String
+            val pair = keyPair
+            if (packet.payload["status"] == "ACCEPTED" && !theirPublicKeyStr.isNullOrEmpty() && pair != null) {
+                try {
+                    CryptoManager.deriveSharedSecret(pair.private, CryptoManager.decodePublicKey(theirPublicKeyStr))
+                } catch (e: Exception) {
+                    Log.e(TAG, "Key derivation failed", e)
+                    null
+                }
+            } else null
         }
         
         createNotificationChannel()
@@ -294,7 +313,7 @@ class SynapseService : Service() {
         clipboardManager.removePrimaryClipChangedListener(clipboardListener)
         discoveryManager.stopDiscovery()
         discoveryManager.unregisterService()
-        transferManager.disconnect()
+        transferManager.stopServer()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -373,6 +392,9 @@ class SynapseService : Service() {
 
                 discoveryManager.registerService(serverPort)
 
+                // Only one discovery at a time: cancelling the old flow stops its NSD listener
+                // *before* the new one is registered (stopDiscovery acts on a shared field).
+                discoveryJob?.cancelAndJoin()
                 discoveryJob = launch {
                     discoveryManager.discoverDevices().collect { devices ->
                         discoveredDevices.value = devices
@@ -562,12 +584,7 @@ class SynapseService : Service() {
                     PacketType.HANDSHAKE_RESPONSE -> {
                         val status = packet.payload["status"] as? String
                         if (status == "ACCEPTED") {
-                            val theirPublicKeyStr = packet.payload["public_key"] as? String
-                            if (theirPublicKeyStr != null && keyPair != null) {
-                                val theirPublicKey = CryptoManager.decodePublicKey(theirPublicKeyStr)
-                                val sharedKey = CryptoManager.deriveSharedSecret(keyPair!!.private, theirPublicKey)
-                                transferManager.encryptionKey = sharedKey
-                            }
+                            // Session key was already installed on the reader thread (handshakeKeyProvider).
                             connectionStatus.value = ConnectionStatus.CONNECTED
                             val deviceName = connectedDevice.value?.name ?: "Cihaz"
                             updateNotification("Bağlı: $deviceName")
@@ -1013,6 +1030,7 @@ class SynapseService : Service() {
         val density = metrics.densityDpi
 
         // Create a dedicated thread for image processing to offload the CPU
+        imageHandlerThread?.quitSafely()
         imageHandlerThread = android.os.HandlerThread("MirroringThread").apply { start() }
         val handler = android.os.Handler(imageHandlerThread!!.looper)
 
@@ -1088,13 +1106,36 @@ class SynapseService : Service() {
         Log.d(TAG, "⏸️ Screen mirroring paused (session kept fully active)")
         // Do NOT release virtualDisplay, imageReader, or mediaProjection!
         // This ensures 0% CPU usage while paused, and avoids Android 14 MediaProjection lifecycle exceptions when restarting!
+        // The foreground service type is left unchanged: the projection is still alive.
+    }
 
+    /**
+     * Releases all capture resources. Safe to call repeatedly. Nulls [mediaProjection]
+     * before calling stop() so the resulting onStop callback doesn't recurse.
+     */
+    private fun releaseScreenCapture() {
+        isStreaming.value = false
+        imageReader?.setOnImageAvailableListener(null, null)
+        imageHandlerThread?.quitSafely()
+        imageHandlerThread = null
+        virtualDisplay?.release()
+        virtualDisplay = null
+        imageReader?.close()
+        imageReader = null
+        val projection = mediaProjection
+        mediaProjection = null
+        projection?.stop()
+    }
+
+    /** The projection was stopped (by us or the system): release it and drop the FGS type. */
+    private fun onProjectionStopped() {
+        Log.d(TAG, "⏹️ MediaProjection stopped")
+        releaseScreenCapture()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
                 createNotification(if (connectionStatus.value == ConnectionStatus.CONNECTED) "Bağlı" else "Synapse hazır"),
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
             )
         }
     }
@@ -1244,16 +1285,7 @@ class SynapseService : Service() {
     // MARK: - Disconnect
 
     fun disconnect() {
-        isStreaming.value = false
-        imageReader?.setOnImageAvailableListener(null, null)
-        imageHandlerThread?.quitSafely()
-        imageHandlerThread = null
-        virtualDisplay?.release()
-        virtualDisplay = null
-        imageReader?.close()
-        imageReader = null
-        mediaProjection?.stop()
-        mediaProjection = null
+        if (mediaProjection != null) onProjectionStopped() else releaseScreenCapture()
 
         clipboardHandler.removeCallbacks(clipboardRunnable)
         stopHeartbeat()

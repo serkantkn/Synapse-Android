@@ -6,6 +6,7 @@ import com.serkantkn.synapse.data.dto.PacketDto
 import com.serkantkn.synapse.data.network.crypto.CryptoManager
 import com.serkantkn.synapse.data.network.mapper.PacketMapper
 import com.serkantkn.synapse.domain.model.Packet
+import com.serkantkn.synapse.domain.model.PacketType
 import com.serkantkn.synapse.domain.repository.TransferRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -30,6 +31,7 @@ class TcpTransferManager : TransferRepository {
 
     companion object {
         private const val TAG = "TcpTransfer"
+        const val MAX_FRAME_SIZE = 10_000_000
     }
 
     private val gson = Gson()
@@ -41,11 +43,21 @@ class TcpTransferManager : TransferRepository {
     private var inputStream: DataInputStream? = null
 
     /** Shared encryption key — null means plaintext (pre-handshake). */
+    @Volatile
     var encryptionKey: SecretKey? = null
+
+    /**
+     * Called on the reader thread for every HANDSHAKE_RESPONSE, before the next frame is read.
+     * Returning a key installs it immediately, so an encrypted frame that follows the
+     * response right away is decrypted correctly (no race with the main-thread collector).
+     */
+    @Volatile
+    var handshakeKeyProvider: ((Packet) -> SecretKey?)? = null
 
     /** Callback for spontaneous disconnection. */
     var onDisconnect: (() -> Unit)? = null
 
+    @Volatile
     private var isRunning = false
 
     override suspend fun startServer(): Int = withContext(Dispatchers.IO) {
@@ -111,11 +123,16 @@ class TcpTransferManager : TransferRepository {
         Thread {
             try {
                 while (socket.isConnected && !socket.isClosed) {
-                    val packet = readPacket() ?: break
-                    incomingPackets.tryEmit(packet)
+                    val packet = readPacket() ?: continue // unknown/malformed packet: skip it
+                    if (packet.type == PacketType.HANDSHAKE_RESPONSE) {
+                        handshakeKeyProvider?.invoke(packet)?.let { encryptionKey = it }
+                    }
+                    if (!incomingPackets.tryEmit(packet)) {
+                        Log.w(TAG, "⚠️ Incoming buffer full, dropped ${packet.type}")
+                    }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Read thread interrupted: ${e.message}")
+                Log.e(TAG, "Read thread ended: ${e.message}")
             } finally {
                 Log.d(TAG, "Read thread terminated for ${socket.inetAddress.hostAddress}")
                 if (clientSocket == socket) {
@@ -163,40 +180,41 @@ class TcpTransferManager : TransferRepository {
         }
     }
 
+    /**
+     * Reads one frame. Throws on fatal stream errors (EOF, bad length, decrypt failure),
+     * which ends the read loop. Returns null for a well-framed packet that can't be
+     * mapped (unknown type, missing fields) so the connection survives protocol additions.
+     */
     private fun readPacket(): Packet? {
-        val stream = synchronized(this) { inputStream } ?: return null
+        val stream = synchronized(this) { inputStream } ?: throw java.io.EOFException("No input stream")
+        // 4-byte length prefix
+        val length = stream.readInt()
+        if (length <= 0 || length > MAX_FRAME_SIZE) {
+            throw java.io.IOException("Invalid packet length received: $length")
+        }
+
+        val data = ByteArray(length)
+        stream.readFully(data)
+
+        val jsonBytes = encryptionKey?.let { key ->
+            CryptoManager.decrypt(data, key)
+        } ?: data
+
         return try {
-            // 4-byte length prefix
-            val length = stream.readInt()
-            if (length <= 0 || length > 10_000_000) {
-                Log.e(TAG, "❌ Invalid packet length received: $length")
-                return null
-            }
-
-            val data = ByteArray(length)
-            stream.readFully(data)
-
-            val jsonBytes = encryptionKey?.let { key ->
-                CryptoManager.decrypt(data, key)
-            } ?: data
-
-            val json = String(jsonBytes, Charsets.UTF_8)
-            // Log.v(TAG, "⬇️ Received JSON: $json")
-            
-            val dto = gson.fromJson(json, PacketDto::class.java)
+            val dto = gson.fromJson(String(jsonBytes, Charsets.UTF_8), PacketDto::class.java)
             PacketMapper.toDomain(dto)
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Error reading packet: ${e.message}")
+            Log.w(TAG, "⚠️ Skipping malformed packet: ${e.message}")
             null
         }
     }
 
     override fun receivePackets(): Flow<Packet> = incomingPackets
 
+    /** Closes the active peer connection. The server socket keeps accepting new peers. */
     @Synchronized
     override fun disconnect() {
         Log.d(TAG, "Cleaning up connections...")
-        isRunning = false
         try {
             inputStream?.close()
             outputStream?.close()
@@ -209,5 +227,15 @@ class TcpTransferManager : TransferRepository {
         clientSocket = null
         encryptionKey = null
     }
-}
 
+    /** Closes the peer connection and the listening server socket. */
+    @Synchronized
+    override fun stopServer() {
+        disconnect()
+        isRunning = false
+        try {
+            serverSocket?.close()
+        } catch (_: Exception) {}
+        serverSocket = null
+    }
+}

@@ -17,11 +17,24 @@ object PacketMapper {
         payload = packet.payload
     )
 
-    fun toDomain(dto: PacketDto): Packet = Packet(
-        packetId = dto.packetId,
-        type = PacketType.valueOf(dto.type),
-        senderId = dto.senderId,
-        timestamp = dto.timestamp,
-        payload = dto.payload
-    )
+    /**
+     * Returns null when the packet can't be represented in the domain model
+     * (unknown type, or required fields that Gson left null despite Kotlin's types).
+     */
+    fun toDomain(dto: PacketDto): Packet? {
+        // Gson bypasses Kotlin null-safety, so check the "non-null" fields explicitly.
+        val typeName: String? = dto.type
+        val packetId: String? = dto.packetId
+        val senderId: String? = dto.senderId
+        if (typeName == null || packetId == null || senderId == null) return null
+        val type = PacketType.entries.firstOrNull { it.name == typeName } ?: return null
+        val payload: Map<String, Any?>? = dto.payload
+        return Packet(
+            packetId = packetId,
+            type = type,
+            senderId = senderId,
+            timestamp = dto.timestamp,
+            payload = payload ?: emptyMap()
+        )
+    }
 }
