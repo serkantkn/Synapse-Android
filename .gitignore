@@ -13,3 +13,10 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# IDE & release outputs
+/.idea/
+/app/release/
+*.apk
+*.aab
+.kotlin/

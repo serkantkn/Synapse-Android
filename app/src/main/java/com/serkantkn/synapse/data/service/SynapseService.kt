@@ -144,8 +144,7 @@ class SynapseService : Service() {
     private val clipboardHandler = Handler(Looper.getMainLooper())
     private val clipboardRunnable = object : Runnable {
         override fun run() {
-            checkClipboardChange()
-            clipboardHandler.postDelayed(this, CLIPBOARD_POLL_INTERVAL)
+            // Deprecated: Aggressive 1-second polling replaced by event-driven OnPrimaryClipChangedListener
         }
     }
 
@@ -359,6 +358,10 @@ class SynapseService : Service() {
 
     // MARK: - Discovery
 
+    fun setTargetServiceType(type: String) {
+        discoveryManager.serviceType = type
+    }
+
     fun startDiscovery() {
         serviceScope.launch {
             try {
@@ -513,6 +516,7 @@ class SynapseService : Service() {
                 startClipboardMonitoring()
                 startHeartbeat()
                 sendWallpaper()
+                registerWallpaperChangeListener()
 
             } catch (e: Exception) {
                 Log.e(TAG, "Accept pairing error", e)
@@ -575,6 +579,7 @@ class SynapseService : Service() {
                             startClipboardMonitoring()
                             startHeartbeat()
                             sendWallpaper()
+                            registerWallpaperChangeListener()
                         } else {
                             connectionStatus.value = ConnectionStatus.DISCONNECTED
                             errorMessage.value = "Eşleşme reddedildi"
@@ -612,12 +617,58 @@ class SynapseService : Service() {
                         }
                     }
                     PacketType.REMOTE_INPUT -> {
-                        val x = (packet.payload["x"] as? Number)?.toDouble() ?: 0.0
-                        val y = (packet.payload["y"] as? Number)?.toDouble() ?: 0.0
                         val action = packet.payload["action"] as? String ?: "CLICK"
                         
-                        SynapseAccessibilityService.instance?.executeRemoteAction(x, y, action)
-                            ?: Log.w(TAG, "Accessibility Service is not running, cannot execute remote action.")
+                        if (action == "KEYBOARD") {
+                            val key = packet.payload["key"] as? String ?: ""
+                            val type = packet.payload["key_type"] as? String ?: "STRING"
+                            SynapseAccessibilityService.instance?.executeKeyboardAction(key, type)
+                                ?: Log.w(TAG, "Accessibility Service is not running, cannot execute keyboard action.")
+                        } else {
+                            val x = (packet.payload["x"] as? Number)?.toDouble() ?: 0.0
+                            val y = (packet.payload["y"] as? Number)?.toDouble() ?: 0.0
+                            SynapseAccessibilityService.instance?.executeRemoteAction(x, y, action)
+                                ?: Log.w(TAG, "Accessibility Service is not running, cannot execute remote action.")
+                        }
+                    }
+                    PacketType.FILE_TRANSFER -> {
+                        val fileName = packet.payload["file_name"] as? String ?: "file_${System.currentTimeMillis()}"
+                        val fileDataB64 = packet.payload["file_data"] as? String
+                        if (fileDataB64 != null) {
+                            try {
+                                val bytes = android.util.Base64.decode(fileDataB64, android.util.Base64.DEFAULT)
+                                val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                                val synapseDir = java.io.File(downloadsDir, "Synapse")
+                                if (!synapseDir.exists()) synapseDir.mkdirs()
+                                
+                                val file = java.io.File(synapseDir, fileName)
+                                java.io.FileOutputStream(file).use { it.write(bytes) }
+                                
+                                updateNotification("Dosya alındı: $fileName")
+                                Log.d(TAG, "File saved successfully: ${file.absolutePath}")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error saving file: ${e.message}")
+                            }
+                        }
+                    }
+                    PacketType.PHOTO_LIBRARY_REQ -> {
+                        fetchPhotoLibraryThumbnails()
+                    }
+                    PacketType.PHOTO_DOWNLOAD_REQ -> {
+                        val photoId = packet.payload["photo_id"] as? String
+                        if (photoId != null) {
+                            handlePhotoDownloadRequest(photoId)
+                        }
+                    }
+                    PacketType.PHOTO_DELETE_REQ -> {
+                        val photoId = packet.payload["photo_id"] as? String
+                        if (photoId != null) {
+                            handleDeletePhotoRequest(photoId)
+                        }
+                    }
+                    PacketType.WALLPAPER_REQUEST -> {
+                        Log.d(TAG, "🖼️ Wallpaper requested by Mac, sending...")
+                        sendWallpaper()
                     }
                     else -> {
                         Log.d(TAG, "Unhandled packet type: ${packet.type}")
@@ -656,11 +707,12 @@ class SynapseService : Service() {
 
     private fun startClipboardMonitoring() {
         acquireWakeLock()
-        clipboardHandler.post(clipboardRunnable)
+        // No periodic polling needed! clipboardManager.addPrimaryClipChangedListener handles real-time clipboard sync perfectly.
     }
 
     private fun checkClipboardChange() {
         try {
+            if (!clipboardManager.hasPrimaryClip()) return
             val clip = clipboardManager.primaryClip
             if (clip != null && clip.itemCount > 0) {
                 val text = clip.getItemAt(0).text?.toString() ?: return
@@ -670,8 +722,10 @@ class SynapseService : Service() {
                     sendClipboard(text)
                 }
             }
+        } catch (e: SecurityException) {
+            // App is not in focus, system denied clipboard access. Ignore quietly.
         } catch (e: Exception) {
-            Log.e(TAG, "Clipboard check error", e)
+            // Ignore other exceptions
         }
     }
 
@@ -732,70 +786,121 @@ class SynapseService : Service() {
 
     // MARK: - Heartbeat
 
-    private fun sendWallpaper() {
+    fun sendWallpaper() {
         serviceScope.launch(Dispatchers.IO) {
             try {
-                Log.d(TAG, "🖼️ Attempting to fetch device wallpaper...")
+                Log.d(TAG, "🖼️ sendWallpaper() called, attempting to fetch wallpaper...")
                 val wallpaperManager = WallpaperManager.getInstance(this@SynapseService)
-                
-                // Try multiple ways to get the drawable
-                val wallpaperDrawable = try {
-                    wallpaperManager.drawable ?: wallpaperManager.peekDrawable()
-                } catch (e: Exception) {
-                    Log.e(TAG, "❌ Error fetching wallpaper drawable: ${e.message}")
-                    null
+                var bitmap: Bitmap? = null
+                val errors = mutableListOf<String>()
+
+                // Yöntem 1: getWallpaperFile() — API 24+
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                    try {
+                        val pfd = wallpaperManager.getWallpaperFile(WallpaperManager.FLAG_SYSTEM)
+                        if (pfd != null) {
+                            val stream = android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
+                            bitmap = android.graphics.BitmapFactory.decodeStream(stream)
+                            stream.close()
+                            if (bitmap != null) Log.d(TAG, "✅ Method 1 (getWallpaperFile) succeeded: ${bitmap.width}x${bitmap.height}")
+                            else errors.add("Method1: decodeStream returned null")
+                        } else {
+                            errors.add("Method1: getWallpaperFile returned null pfd")
+                        }
+                    } catch (se: SecurityException) {
+                        errors.add("Method1: SecurityException - ${se.message}")
+                    } catch (e: Exception) {
+                        errors.add("Method1: ${e.javaClass.simpleName} - ${e.message}")
+                    }
                 }
 
-                if (wallpaperDrawable == null) {
-                    Log.w(TAG, "⚠️ Wallpaper drawable is null. Falling back to system default.")
-                    return@launch
+                // Yöntem 2: drawable
+                if (bitmap == null) {
+                    try {
+                        val drawable = wallpaperManager.drawable ?: wallpaperManager.peekDrawable()
+                        if (drawable != null) {
+                            bitmap = if (drawable is BitmapDrawable) {
+                                drawable.bitmap?.also { Log.d(TAG, "✅ Method 2a (BitmapDrawable) succeeded") }
+                            } else {
+                                val w = drawable.intrinsicWidth.coerceAtLeast(360)
+                                val h = drawable.intrinsicHeight.coerceAtLeast(720)
+                                val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                                val canvas = Canvas(b)
+                                drawable.setBounds(0, 0, w, h)
+                                drawable.draw(canvas)
+                                Log.d(TAG, "✅ Method 2b (drawable render) succeeded")
+                                b
+                            }
+                        } else {
+                            errors.add("Method2: drawable is null")
+                        }
+                    } catch (se: SecurityException) {
+                        errors.add("Method2: SecurityException - ${se.message}")
+                    } catch (e: Exception) {
+                        errors.add("Method2: ${e.javaClass.simpleName} - ${e.message}")
+                    }
                 }
-                
-                val originalBitmap = if (wallpaperDrawable is BitmapDrawable) {
-                    wallpaperDrawable.bitmap
-                } else {
-                    val b = Bitmap.createBitmap(
-                        wallpaperDrawable.intrinsicWidth.coerceAtLeast(1),
-                        wallpaperDrawable.intrinsicHeight.coerceAtLeast(1),
-                        Bitmap.Config.ARGB_8888
-                    )
+
+                // Yöntem 3: WallpaperColors → Gradient
+                if (bitmap == null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+                    try {
+                        val colors = wallpaperManager.getWallpaperColors(WallpaperManager.FLAG_SYSTEM)
+                        if (colors != null) {
+                            val primary = colors.primaryColor.toArgb()
+                            val secondary = colors.secondaryColor?.toArgb() ?: primary
+                            val b = Bitmap.createBitmap(360, 720, Bitmap.Config.ARGB_8888)
+                            val canvas = Canvas(b)
+                            val paint = android.graphics.Paint()
+                            val shader = android.graphics.LinearGradient(0f, 0f, 0f, 720f, primary, secondary, android.graphics.Shader.TileMode.CLAMP)
+                            paint.shader = shader
+                            canvas.drawRect(0f, 0f, 360f, 720f, paint)
+                            bitmap = b
+                            Log.d(TAG, "✅ Method 3 (WallpaperColors gradient) succeeded: #${Integer.toHexString(primary)} → #${Integer.toHexString(secondary)}")
+                        } else {
+                            errors.add("Method3: getWallpaperColors returned null")
+                        }
+                    } catch (se: SecurityException) {
+                        errors.add("Method3: SecurityException - ${se.message}")
+                    } catch (e: Exception) {
+                        errors.add("Method3: ${e.javaClass.simpleName} - ${e.message}")
+                    }
+                }
+
+                // Yöntem 4: Son Çare (Default Gradient)
+                if (bitmap == null) {
+                    Log.w(TAG, "⚠️ All wallpaper methods failed. Falling back to default gradient. Errors: ${errors.joinToString(" | ")}")
+                    val b = Bitmap.createBitmap(360, 720, Bitmap.Config.ARGB_8888)
                     val canvas = Canvas(b)
-                    wallpaperDrawable.setBounds(0, 0, canvas.width, canvas.height)
-                    wallpaperDrawable.draw(canvas)
-                    b
+                    val paint = android.graphics.Paint()
+                    // Zarif bir koyu mavi/mor degrade
+                    val shader = android.graphics.LinearGradient(
+                        0f, 0f, 360f, 720f,
+                        android.graphics.Color.parseColor("#1A1A2E"),
+                        android.graphics.Color.parseColor("#16213E"),
+                        android.graphics.Shader.TileMode.CLAMP
+                    )
+                    paint.shader = shader
+                    canvas.drawRect(0f, 0f, 360f, 720f, paint)
+                    bitmap = b
                 }
 
-                if (originalBitmap == null) return@launch
-
-                // Mockup aspect ratio is approx 1:2 (180x360)
-                // Let's crop the center of the wallpaper to match a phone screen aspect ratio
-                val targetWidth = 360
-                val targetHeight = 720
-                
-                val sourceWidth = originalBitmap.width
-                val sourceHeight = originalBitmap.height
-                
-                val sourceAspectRatio = sourceWidth.toFloat() / sourceHeight.toFloat()
-                val targetAspectRatio = targetWidth.toFloat() / targetHeight.toFloat()
-                
-                var cropWidth = sourceWidth
-                var cropHeight = sourceHeight
-                var startX = 0
-                var startY = 0
-                
-                if (sourceAspectRatio > targetAspectRatio) {
-                    cropWidth = (sourceHeight * targetAspectRatio).toInt()
-                    startX = (sourceWidth - cropWidth) / 2
+                // Merkezi kırpma ve ölçeklendirme
+                val targetW = 360; val targetH = 720
+                val srcW = bitmap.width; val srcH = bitmap.height
+                val srcRatio = srcW.toFloat() / srcH
+                val tgtRatio = targetW.toFloat() / targetH
+                val (cropW, cropH, startX, startY) = if (srcRatio > tgtRatio) {
+                    val cw = (srcH * tgtRatio).toInt()
+                    listOf(cw, srcH, (srcW - cw) / 2, 0)
                 } else {
-                    cropHeight = (sourceWidth / targetAspectRatio).toInt()
-                    startY = (sourceHeight - cropHeight) / 2
+                    val ch = (srcW / tgtRatio).toInt()
+                    listOf(srcW, ch, 0, (srcH - ch) / 2)
                 }
 
-                val croppedBitmap = Bitmap.createBitmap(originalBitmap, startX, startY, cropWidth, cropHeight)
-                val scaledBitmap = Bitmap.createScaledBitmap(croppedBitmap, targetWidth, targetHeight, true)
-
+                val cropped = Bitmap.createBitmap(bitmap, startX, startY, cropW, cropH)
+                val scaled = Bitmap.createScaledBitmap(cropped, targetW, targetH, true)
                 val outputStream = ByteArrayOutputStream()
-                scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 60, outputStream)
+                scaled.compress(Bitmap.CompressFormat.JPEG, 70, outputStream)
                 val base64Image = Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
 
                 val packet = Packet(
@@ -806,11 +911,36 @@ class SynapseService : Service() {
                     payload = mapOf("image" to base64Image)
                 )
                 transferManager.sendPacket(packet)
-                Log.d(TAG, "✅ Wallpaper sent successfully (${outputStream.size()} bytes)")
+                Log.d(TAG, "✅ Wallpaper sent (${outputStream.size()} bytes)")
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to send wallpaper: ${e.message}")
+                Log.e(TAG, "❌ sendWallpaper outer exception: ${e.message}", e)
             }
         }
+    }
+
+
+
+    private var wallpaperChangeReceiver: android.content.BroadcastReceiver? = null
+
+    private fun registerWallpaperChangeListener() {
+        if (wallpaperChangeReceiver != null) return // Zaten kayıtlı
+        wallpaperChangeReceiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+                if (intent?.action == android.content.Intent.ACTION_WALLPAPER_CHANGED) {
+                    Log.d(TAG, "🖼️ Wallpaper changed, sending update to Mac...")
+                    sendWallpaper()
+                }
+            }
+        }
+        val filter = android.content.IntentFilter(android.content.Intent.ACTION_WALLPAPER_CHANGED)
+        registerReceiver(wallpaperChangeReceiver, filter)
+    }
+
+    private fun unregisterWallpaperChangeListener() {
+        wallpaperChangeReceiver?.let {
+            try { unregisterReceiver(it) } catch (_: Exception) {}
+        }
+        wallpaperChangeReceiver = null
     }
 
     private fun startHeartbeat() {
@@ -854,6 +984,17 @@ class SynapseService : Service() {
 
     private fun startScreenMirroring() {
         if (isStreaming.value) return
+        if (mediaProjection != null && virtualDisplay != null) {
+            Log.d(TAG, "▶️ Resuming existing VirtualDisplay stream")
+            isStreaming.value = true
+            return
+        }
+        if (mediaProjection != null) {
+            Log.d(TAG, "♻️ Reusing existing MediaProjection session")
+            isStreaming.value = true
+            setupScreenCapture()
+            return
+        }
         // Signal the activity to request permission
         val intent = Intent("com.serkantkn.synapse.ACTION_REQUEST_SCREEN_CAPTURE").apply {
             setPackage(packageName)
@@ -880,7 +1021,9 @@ class SynapseService : Service() {
         imageReader?.setOnImageAvailableListener({ reader ->
             val image = reader.acquireLatestImage()
             if (image != null) {
-                processScreenFrame(image)
+                if (isStreaming.value) {
+                    processScreenFrame(image)
+                }
                 image.close()
             }
         }, handler)
@@ -922,12 +1065,16 @@ class SynapseService : Service() {
             val base64Frame = Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
 
             serviceScope.launch {
+                val isAccActive = SynapseAccessibilityService.instance != null
                 val packet = Packet(
                     packetId = UUID.randomUUID().toString(),
                     type = PacketType.SCREEN_FRAME,
                     senderId = discoveryManager.getDeviceId(),
                     timestamp = System.currentTimeMillis(),
-                    payload = mapOf("image" to base64Frame)
+                    payload = mapOf(
+                        "image" to base64Frame,
+                        "accessibility_enabled" to isAccActive
+                    )
                 )
                 transferManager.sendPacket(packet)
             }
@@ -938,37 +1085,179 @@ class SynapseService : Service() {
 
     fun stopScreenMirroring() {
         isStreaming.value = false
-        imageReader?.setOnImageAvailableListener(null, null)
-        
-        imageHandlerThread?.quitSafely()
-        imageHandlerThread = null
-        
-        virtualDisplay?.release()
-        virtualDisplay = null
-        
-        imageReader?.close()
-        imageReader = null
-        
-        mediaProjection?.stop()
-        mediaProjection = null
+        Log.d(TAG, "⏸️ Screen mirroring paused (session kept fully active)")
+        // Do NOT release virtualDisplay, imageReader, or mediaProjection!
+        // This ensures 0% CPU usage while paused, and avoids Android 14 MediaProjection lifecycle exceptions when restarting!
 
-        // Revert foreground service type to connectedDevice only
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
                 createNotification(if (connectionStatus.value == ConnectionStatus.CONNECTED) "Bağlı" else "Synapse hazır"),
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             )
         }
-        
-        Log.d(TAG, "🛑 Screen Mirroring stopped")
     }
+
+    // MARK: - Photo Library
+    
+    private fun fetchPhotoLibraryThumbnails() {
+        serviceScope.launch(Dispatchers.IO) {
+            val photosList = mutableListOf<Map<String, Any>>()
+            try {
+                val projection = arrayOf(
+                    android.provider.MediaStore.Images.Media._ID,
+                    android.provider.MediaStore.Images.Media.DISPLAY_NAME,
+                    android.provider.MediaStore.Images.Media.DATE_ADDED,
+                    android.provider.MediaStore.Images.Media.SIZE
+                )
+                val sortOrder = "${android.provider.MediaStore.Images.Media.DATE_ADDED} DESC"
+                
+                contentResolver.query(
+                    android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    projection,
+                    null,
+                    null,
+                    sortOrder
+                )?.use { cursor ->
+                    val idCol = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Images.Media._ID)
+                    val nameCol = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Images.Media.DISPLAY_NAME)
+                    val dateCol = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Images.Media.DATE_ADDED)
+                    val sizeCol = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Images.Media.SIZE)
+                    
+                    var count = 0
+                    while (cursor.moveToNext() && count < 50) {
+                        val id = cursor.getLong(idCol)
+                        val name = cursor.getString(nameCol) ?: "unknown"
+                        val date = cursor.getLong(dateCol)
+                        val size = cursor.getLong(sizeCol)
+                        
+                        val uri = android.content.ContentUris.withAppendedId(
+                            android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id
+                        )
+                        
+                        var base64Thumb = ""
+                        try {
+                            val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                contentResolver.loadThumbnail(uri, android.util.Size(256, 256), null)
+                            } else {
+                                android.provider.MediaStore.Images.Thumbnails.getThumbnail(
+                                    contentResolver, id, android.provider.MediaStore.Images.Thumbnails.MINI_KIND, null
+                                )
+                            }
+                            
+                            if (bitmap != null) {
+                                val stream = java.io.ByteArrayOutputStream()
+                                bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 70, stream)
+                                val bytes = stream.toByteArray()
+                                base64Thumb = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                                bitmap.recycle()
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to load thumbnail for $id", e)
+                        }
+                        
+                        photosList.add(mapOf(
+                            "id" to id.toString(),
+                            "name" to name,
+                            "date" to date,
+                            "size" to size,
+                            "thumbnail" to base64Thumb
+                        ))
+                        count++
+                    }
+                }
+                
+                val packet = Packet(
+                    packetId = UUID.randomUUID().toString(),
+                    type = PacketType.PHOTO_LIBRARY_RESP,
+                    senderId = discoveryManager.getDeviceId(),
+                    timestamp = System.currentTimeMillis(),
+                    payload = mapOf("photos" to photosList)
+                )
+                transferManager.sendPacket(packet)
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error fetching photo library", e)
+            }
+        }
+    }
+
+    private fun handlePhotoDownloadRequest(photoId: String) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val id = photoId.toLongOrNull() ?: return@launch
+                val uri = android.content.ContentUris.withAppendedId(
+                    android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id
+                )
+                
+                contentResolver.openInputStream(uri)?.use { stream ->
+                    val bytes = stream.readBytes()
+                    val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    if (bitmap != null) {
+                        val outStream = java.io.ByteArrayOutputStream()
+                        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, outStream)
+                        val compressedBytes = outStream.toByteArray()
+                        val base64Data = android.util.Base64.encodeToString(compressedBytes, android.util.Base64.NO_WRAP)
+                        bitmap.recycle()
+                        
+                        val packet = Packet(
+                            packetId = UUID.randomUUID().toString(),
+                            type = PacketType.PHOTO_DOWNLOAD_RESP,
+                            senderId = discoveryManager.getDeviceId(),
+                            timestamp = System.currentTimeMillis(),
+                            payload = mapOf(
+                                "photo_id" to photoId,
+                                "data" to base64Data
+                            )
+                        )
+                        transferManager.sendPacket(packet)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error downloading photo $photoId", e)
+            }
+        }
+    }
+
+    private fun handleDeletePhotoRequest(photoId: String) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val id = photoId.toLongOrNull() ?: return@launch
+                val uri = android.content.ContentUris.withAppendedId(
+                    android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id
+                )
+                try {
+                    contentResolver.delete(uri, null, null)
+                    Log.d(TAG, "Deleted photo $photoId successfully from MediaStore.")
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "SecurityException deleting photo: ${e.message}")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error deleting photo $photoId", e)
+            }
+        }
+    }
+
+
 
     // MARK: - Disconnect
 
     fun disconnect() {
+        isStreaming.value = false
+        imageReader?.setOnImageAvailableListener(null, null)
+        imageHandlerThread?.quitSafely()
+        imageHandlerThread = null
+        virtualDisplay?.release()
+        virtualDisplay = null
+        imageReader?.close()
+        imageReader = null
+        mediaProjection?.stop()
+        mediaProjection = null
+
         clipboardHandler.removeCallbacks(clipboardRunnable)
         stopHeartbeat()
+        unregisterWallpaperChangeListener()
         releaseWakeLock()
         transferManager.disconnect()
         connectionStatus.value = ConnectionStatus.DISCONNECTED

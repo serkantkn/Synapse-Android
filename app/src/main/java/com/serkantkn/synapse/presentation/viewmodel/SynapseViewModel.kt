@@ -154,6 +154,19 @@ class SynapseViewModel(application: Application) : AndroidViewModel(application)
         synapseService?.clearError()
     }
 
+    // Target platform selection
+    private val _targetPlatform = MutableStateFlow("macOS")
+    val targetPlatform: StateFlow<String> = _targetPlatform.asStateFlow()
+
+    fun setTargetPlatform(platform: String) {
+        _targetPlatform.value = platform
+        Log.d(TAG, "🎯 Target platform set to: $platform")
+        // If iOS, we need to search for _synapse_ios._tcp services
+        synapseService?.setTargetServiceType(
+            if (platform == "iOS") "_synapse_ios._tcp." else "_synapse._tcp."
+        )
+    }
+
     override fun onCleared() {
         super.onCleared()
         if (isBound) {

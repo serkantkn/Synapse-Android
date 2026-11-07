@@ -24,6 +24,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.serkantkn.synapse.domain.model.ConnectionStatus
 import com.serkantkn.synapse.domain.model.Device
 import com.serkantkn.synapse.presentation.viewmodel.SynapseViewModel
@@ -50,6 +54,22 @@ fun HomeScreen(
     val clipboardContent by viewModel.clipboardContent.collectAsState()
     val incomingClipboard by viewModel.incomingClipboard.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
+
+    val context = LocalContext.current
+    var isAccessibilityActive by remember { mutableStateOf(false) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isAccessibilityActive = com.serkantkn.synapse.data.service.SynapseAccessibilityService.instance != null
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val pulseScale by infiniteTransition.animateFloat(
@@ -107,6 +127,48 @@ fun HomeScreen(
                     onDiscover = { viewModel.startDiscovery() }, onStop = { viewModel.stopDiscovery() },
                     onDisconnect = { viewModel.disconnect() }, onPair = onNavigateToPairing
                 )
+            }
+
+            // Accessibility Service Warning
+            if (!isAccessibilityActive) {
+                item {
+                    GlassCard(
+                        containerColor = Amber400.copy(alpha = 0.08f),
+                        borderColor = Amber400.copy(alpha = 0.25f)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.AccessibilityNew, null, tint = Amber400)
+                                Spacer(Modifier.width(10.dp))
+                                Text("Erişilebilirlik Servisi Kapalı", fontWeight = FontWeight.Bold, color = Amber400, fontSize = 15.sp)
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Mac üzerinden uzaktan ekran kontrolü, klavye yönlendirme ve sürükle-bırak dosya transferi özelliklerinin çalışabilmesi için Synapse erişilebilirlik servisini etkinleştirmeniz gerekmektedir.",
+                                color = Color.White.copy(alpha = 0.7f),
+                                fontSize = 13.sp,
+                                lineHeight = 18.sp
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Button(
+                                onClick = {
+                                    try {
+                                        val intent = android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        // Fallback
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Amber400),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                                modifier = Modifier.height(36.dp)
+                            ) {
+                                Text("Şimdi Etkinleştir", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
             }
 
             // Connected features
