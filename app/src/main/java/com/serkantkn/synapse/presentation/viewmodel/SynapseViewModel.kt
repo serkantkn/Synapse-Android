@@ -130,10 +130,6 @@ class SynapseViewModel(application: Application) : AndroidViewModel(application)
         synapseService?.pairWithIp(ip, pin)
     }
 
-    fun acceptPairing(incomingPacket: Packet) {
-        synapseService?.acceptPairing(incomingPacket)
-    }
-
     fun rejectPairing() {
         synapseService?.rejectPairing()
     }

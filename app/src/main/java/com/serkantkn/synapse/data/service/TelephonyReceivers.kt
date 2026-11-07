@@ -16,7 +16,7 @@ class CallReceiver(private val onCallEvent: (String, String?) -> Unit) : Broadca
             val state = intent.getStringExtra(TelephonyManager.EXTRA_STATE)
             val number = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
             
-            Log.d("CallReceiver", "Phone state changed: $state, Number: $number")
+            Log.d("CallReceiver", "Phone state changed: $state")
             
             state?.let {
                 onCallEvent(it, number)
@@ -37,7 +37,7 @@ class SmsReceiver(private val onSmsReceived: (String, String) -> Unit) : Broadca
                 val smsMessage = android.telephony.SmsMessage.createFromPdu(pdu as ByteArray)
                 val sender = smsMessage.displayOriginatingAddress
                 val body = smsMessage.displayMessageBody
-                Log.d("SmsReceiver", "SMS from $sender: $body")
+                Log.d("SmsReceiver", "SMS received (${body?.length ?: 0} chars)")
                 onSmsReceived(sender, body)
             }
         }

@@ -65,6 +65,9 @@ class SynapseService : Service() {
         private const val HEARTBEAT_TIMEOUT = 18000L // 18 seconds (be more lenient)
         private const val PREFS_NAME = "synapse_prefs"
         private const val KEY_KNOWN_DEVICES = "known_devices"
+        private const val KEY_TOKEN_PREFIX = "pairing_token_"
+        private const val PROTOCOL_VERSION = 2
+        private const val MAX_RECONNECT_ATTEMPTS = 6
     }
 
     // Binder for Activity <-> Service communication
@@ -170,6 +173,33 @@ class SynapseService : Service() {
     private fun isKnownDevice(deviceId: String): Boolean {
         return getKnownDevices().contains(deviceId)
     }
+
+    // Pairing token per peer, derived from the first PIN-authenticated session. Reconnects prove
+    // knowledge of it instead of a PIN; it also feeds the session key, so an impostor using the
+    // same device id can't derive the key.
+    private fun getPairingToken(deviceId: String): String? = prefs.getString("$KEY_TOKEN_PREFIX$deviceId", null)
+
+    private fun savePairingToken(deviceId: String, token: String) {
+        prefs.edit().putString("$KEY_TOKEN_PREFIX$deviceId", token).apply()
+    }
+
+    private fun removePairingToken(deviceId: String) {
+        prefs.edit().remove("$KEY_TOKEN_PREFIX$deviceId").apply()
+    }
+
+    // Manual-IP / QR targets have placeholder ids, so remember which peer id answered at an address.
+    private fun peerIdForAddress(ip: String, port: Int): String? = prefs.getString("peer_at_$ip:$port", null)
+
+    private fun savePeerIdForAddress(ip: String, port: Int, peerId: String) {
+        prefs.edit().putString("peer_at_$ip:$port", peerId).apply()
+    }
+
+    /** Auth mode + secret of the handshake in flight; read on the socket reader thread. */
+    private data class PendingAuth(val mode: String, val secret: ByteArray, val targetId: String)
+
+    @Volatile
+    private var pendingAuth: PendingAuth? = null
+    private var reconnectAttempts = 0
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
@@ -200,9 +230,10 @@ class SynapseService : Service() {
         transferManager.handshakeKeyProvider = { packet ->
             val theirPublicKeyStr = packet.payload["public_key"] as? String
             val pair = keyPair
-            if (packet.payload["status"] == "ACCEPTED" && !theirPublicKeyStr.isNullOrEmpty() && pair != null) {
+            val auth = pendingAuth
+            if (packet.payload["status"] == "ACCEPTED" && !theirPublicKeyStr.isNullOrEmpty() && pair != null && auth != null) {
                 try {
-                    CryptoManager.deriveSharedSecret(pair.private, CryptoManager.decodePublicKey(theirPublicKeyStr))
+                    CryptoManager.deriveSharedSecret(pair.private, CryptoManager.decodePublicKey(theirPublicKeyStr), auth.secret)
                 } catch (e: Exception) {
                     Log.e(TAG, "Key derivation failed", e)
                     null
@@ -387,10 +418,8 @@ class SynapseService : Service() {
                 connectionStatus.value = ConnectionStatus.DISCOVERING
                 updateNotification("Cihaz aranıyor...")
 
-                serverPort = transferManager.startServer()
-                Log.d(TAG, "TCP server on port: $serverPort")
-
-                discoveryManager.registerService(serverPort)
+                // The phone is always the client (Mac and iOS listen). Not running an inbound
+                // server or advertising one removes an unauthenticated entry point into the phone.
 
                 // Only one discovery at a time: cancelling the old flow stops its NSD listener
                 // *before* the new one is registered (stopDiscovery acts on a shared field).
@@ -399,10 +428,9 @@ class SynapseService : Service() {
                     discoveryManager.discoverDevices().collect { devices ->
                         discoveredDevices.value = devices
                         
-                        // Auto-reconnect: if a previously paired device is found, reconnect automatically
-                        val knownDevices = getKnownDevices()
+                        // Auto-reconnect only to peers we hold a pairing token for (no PIN needed).
                         if (connectionStatus.value == ConnectionStatus.DISCOVERING) {
-                            val matchingDevice = devices.find { knownDevices.contains(it.id) || it.id == lastConnectedDeviceId }
+                            val matchingDevice = devices.find { getPairingToken(it.id) != null }
                             if (matchingDevice != null) {
                                 Log.d(TAG, "♻️ Auto-reconnecting to ${matchingDevice.name}...")
                                 lastConnectedDeviceId = null // prevent retry loop
@@ -436,15 +464,33 @@ class SynapseService : Service() {
         serviceScope.launch {
             try {
                 connectionStatus.value = ConnectionStatus.PAIRING
-                // Only generate a new code if we don't have one set (e.g. from manual entry or QR)
-                if (pairingCode.value.isEmpty()) {
-                    pairingCode.value = generatePairingCode()
-                }
+                errorMessage.value = null
                 updateNotification("Eşleşme: ${device.name}...")
+
+                // Known peer → prove the stored token; otherwise prove the PIN shown on the peer.
+                val peerId = if (getPairingToken(device.id) != null) device.id
+                    else peerIdForAddress(device.ipAddress, device.port) ?: device.id
+                val token = getPairingToken(peerId)
+                val auth = if (token != null) {
+                    PendingAuth(CryptoManager.AUTH_MODE_TOKEN, java.util.Base64.getDecoder().decode(token), peerId)
+                } else {
+                    val pin = pairingCode.value.trim()
+                    if (pin.length < 6) {
+                        errorMessage.value = "Karşı cihazda görünen PIN kodunu girin"
+                        connectionStatus.value = ConnectionStatus.ERROR
+                        return@launch
+                    }
+                    PendingAuth(CryptoManager.AUTH_MODE_PIN, pin.toByteArray(Charsets.UTF_8), device.id)
+                }
+
+                // Fresh ephemeral key pair per session (forward secrecy across sessions).
+                val pair = CryptoManager.generateKeyPair()
+                keyPair = pair
+                pendingAuth = auth
 
                 transferManager.connectTo(device.ipAddress, device.port)
 
-                val publicKeyStr = keyPair?.let { CryptoManager.encodePublicKey(it.public) } ?: ""
+                val publicKeyStr = CryptoManager.encodePublicKey(pair.public)
                 val handshakePacket = Packet(
                     packetId = UUID.randomUUID().toString(),
                     type = PacketType.HANDSHAKE_REQUEST,
@@ -454,14 +500,30 @@ class SynapseService : Service() {
                         "device_name" to android.os.Build.MODEL,
                         "device_type" to "android",
                         "public_key" to publicKeyStr,
-                        "pairing_code" to pairingCode.value
+                        "protocol" to PROTOCOL_VERSION,
+                        "auth_mode" to auth.mode,
+                        // The PIN itself is never sent; only an HMAC bound to our ephemeral key.
+                        "auth_proof" to CryptoManager.authProof(auth.secret, auth.mode, publicKeyStr)
                     )
                 )
                 transferManager.sendPacket(handshakePacket, encrypt = false)
                 connectedDevice.value = device
 
             } catch (e: Exception) {
-                Log.e(TAG, "Pairing error", e)
+                Log.e(TAG, "Pairing error: ${e.message}")
+                // A paired peer that's briefly unreachable (restarting, stale NSD record):
+                // keep retrying with backoff instead of parking in ERROR.
+                if (pendingAuth?.mode == CryptoManager.AUTH_MODE_TOKEN && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                    reconnectAttempts++
+                    pendingAuth = null
+                    connectionStatus.value = ConnectionStatus.DISCOVERING
+                    updateNotification("Yeniden bağlanılıyor... ($reconnectAttempts)")
+                    delay(2_000L * reconnectAttempts)
+                    if (connectionStatus.value == ConnectionStatus.DISCOVERING) pairWithDevice(device)
+                    return@launch
+                }
+                reconnectAttempts = 0
+                pendingAuth = null
                 errorMessage.value = "Eşleşme hatası: ${e.message}"
                 connectionStatus.value = ConnectionStatus.ERROR
             }
@@ -510,43 +572,6 @@ class SynapseService : Service() {
         pairWithDevice(device)
     }
 
-    fun acceptPairing(incomingPacket: Packet) {
-        serviceScope.launch {
-            try {
-                val theirPublicKeyStr = incomingPacket.payload["public_key"] as? String
-                if (theirPublicKeyStr != null && keyPair != null) {
-                    val theirPublicKey = CryptoManager.decodePublicKey(theirPublicKeyStr)
-                    val sharedKey = CryptoManager.deriveSharedSecret(keyPair!!.private, theirPublicKey)
-                    transferManager.encryptionKey = sharedKey
-                }
-
-                val publicKeyStr = keyPair?.let { CryptoManager.encodePublicKey(it.public) } ?: ""
-                val response = Packet(
-                    packetId = UUID.randomUUID().toString(),
-                    type = PacketType.HANDSHAKE_RESPONSE,
-                    senderId = discoveryManager.getDeviceId(),
-                    timestamp = System.currentTimeMillis(),
-                    payload = mapOf(
-                        "status" to "ACCEPTED",
-                        "public_key" to publicKeyStr
-                    )
-                )
-                transferManager.sendPacket(response, encrypt = false)
-                connectionStatus.value = ConnectionStatus.CONNECTED
-                updateNotification("Bağlı: ${incomingPacket.payload["device_name"] ?: "Cihaz"}")
-                lastConnectedDeviceId = incomingPacket.senderId
-                startClipboardMonitoring()
-                startHeartbeat()
-                sendWallpaper()
-                registerWallpaperChangeListener()
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Accept pairing error", e)
-                errorMessage.value = "Eşleşme kabul hatası: ${e.message}"
-            }
-        }
-    }
-
     fun rejectPairing() {
         serviceScope.launch {
             val response = Packet(
@@ -570,27 +595,46 @@ class SynapseService : Service() {
     private fun listenForIncomingPackets() {
         serviceScope.launch {
             transferManager.receivePackets().collect { packet ->
+                // Commands are only honoured inside an established, authenticated session.
+                if (packet.type != PacketType.HANDSHAKE_REQUEST && packet.type != PacketType.HANDSHAKE_RESPONSE &&
+                    connectionStatus.value != ConnectionStatus.CONNECTED
+                ) {
+                    Log.w(TAG, "⛔ Ignoring ${packet.type}: not connected")
+                    return@collect
+                }
                 when (packet.type) {
                     PacketType.HANDSHAKE_REQUEST -> {
-                        val deviceId = packet.senderId
-                        if (isKnownDevice(deviceId)) {
-                            Log.d(TAG, "🤝 Auto-accepting known device: $deviceId")
-                            acceptPairing(packet)
-                        } else {
-                            connectionStatus.value = ConnectionStatus.PAIRING
-                            incomingClipboard.value = null
-                        }
+                        // The phone only initiates sessions; it never grants one to an inbound peer.
+                        Log.w(TAG, "⛔ Ignoring inbound handshake from ${packet.senderId}")
                     }
                     PacketType.HANDSHAKE_RESPONSE -> {
+                        if (connectionStatus.value != ConnectionStatus.PAIRING) {
+                            Log.w(TAG, "⛔ Unexpected HANDSHAKE_RESPONSE, ignoring")
+                            return@collect
+                        }
                         val status = packet.payload["status"] as? String
-                        if (status == "ACCEPTED") {
+                        val auth = pendingAuth
+                        val sessionKey = transferManager.encryptionKey
+                        if (status == "ACCEPTED" && (sessionKey == null || auth == null)) {
+                            // "Accepted" without a usable key would mean a plaintext session: refuse it.
+                            Log.e(TAG, "❌ Peer accepted without a valid key exchange, dropping")
+                            pendingAuth = null
+                            disconnect()
+                            errorMessage.value = "Güvenli bağlantı kurulamadı"
+                        } else if (status == "ACCEPTED" && sessionKey != null && auth != null) {
                             // Session key was already installed on the reader thread (handshakeKeyProvider).
+                            pendingAuth = null
+                            reconnectAttempts = 0
                             connectionStatus.value = ConnectionStatus.CONNECTED
                             val deviceName = connectedDevice.value?.name ?: "Cihaz"
                             updateNotification("Bağlı: $deviceName")
                             
-                            // Persist this device as known
-                            packet.senderId.let { saveKnownDevice(it) }
+                            // Persist this device as known; a PIN pairing yields the long-term token.
+                            saveKnownDevice(packet.senderId)
+                            if (auth.mode == CryptoManager.AUTH_MODE_PIN) {
+                                savePairingToken(packet.senderId, CryptoManager.deriveDeviceToken(sessionKey))
+                            }
+                            connectedDevice.value?.let { savePeerIdForAddress(it.ipAddress, it.port, packet.senderId) }
                             
                             lastConnectedDeviceId = connectedDevice.value?.id
                             startClipboardMonitoring()
@@ -598,8 +642,21 @@ class SynapseService : Service() {
                             sendWallpaper()
                             registerWallpaperChangeListener()
                         } else {
-                            connectionStatus.value = ConnectionStatus.DISCONNECTED
-                            errorMessage.value = "Eşleşme reddedildi"
+                            val reasonCode = packet.payload["reason_code"] as? String
+                            if (auth?.mode == CryptoManager.AUTH_MODE_TOKEN) {
+                                // Stored token no longer accepted (forgotten on the peer, or PIN required):
+                                // drop it so the next attempt asks for the PIN.
+                                removePairingToken(auth.targetId)
+                                removePairingToken(packet.senderId)
+                            }
+                            pendingAuth = null
+                            disconnect()
+                            errorMessage.value = when (reasonCode) {
+                                "BAD_PIN" -> "PIN kodu hatalı"
+                                "PIN_REQUIRED", "UNKNOWN_DEVICE" -> "Eşleşme yenilenmeli: karşı cihazdaki PIN kodunu girin"
+                                "OUTDATED_CLIENT" -> "Karşı cihazdaki uygulama sürümü uyumsuz"
+                                else -> "Eşleşme reddedildi"
+                            }
                             updateNotification("Eşleşme reddedildi")
                         }
                     }
@@ -609,7 +666,7 @@ class SynapseService : Service() {
                         val clip = ClipData.newPlainText("Synapse", content)
                         clipboardManager.setPrimaryClip(clip)
                         lastClipboardText = content
-                        Log.d(TAG, "Received clipboard: ${content.take(50)}...")
+                        Log.d(TAG, "Received clipboard (${content.length} chars)")
                     }
                     PacketType.HEARTBEAT -> {
                         Log.d(TAG, "Heartbeat from ${packet.senderId}")
@@ -649,7 +706,7 @@ class SynapseService : Service() {
                         }
                     }
                     PacketType.FILE_TRANSFER -> {
-                        val fileName = packet.payload["file_name"] as? String ?: "file_${System.currentTimeMillis()}"
+                        val fileName = sanitizeFileName(packet.payload["file_name"] as? String)
                         val fileDataB64 = packet.payload["file_data"] as? String
                         if (fileDataB64 != null) {
                             try {
@@ -658,10 +715,15 @@ class SynapseService : Service() {
                                 val synapseDir = java.io.File(downloadsDir, "Synapse")
                                 if (!synapseDir.exists()) synapseDir.mkdirs()
                                 
-                                val file = java.io.File(synapseDir, fileName)
+                                val file = uniqueFile(synapseDir, fileName)
+                                // Defense in depth: the resolved path must stay inside Downloads/Synapse.
+                                if (file.canonicalFile.parentFile != synapseDir.canonicalFile) {
+                                    Log.e(TAG, "⛔ Refusing to write outside the Synapse folder")
+                                    return@collect
+                                }
                                 java.io.FileOutputStream(file).use { it.write(bytes) }
                                 
-                                updateNotification("Dosya alındı: $fileName")
+                                updateNotification("Dosya alındı: ${file.name}")
                                 Log.d(TAG, "File saved successfully: ${file.absolutePath}")
                             } catch (e: Exception) {
                                 Log.e(TAG, "Error saving file: ${e.message}")
@@ -693,6 +755,25 @@ class SynapseService : Service() {
                 }
             }
         }
+    }
+
+    /** Keeps only a bare file name: strips directories, "..", control and reserved characters. */
+    private fun sanitizeFileName(raw: String?): String {
+        val base = raw?.substringAfterLast('/')?.substringAfterLast('\\')
+            ?.replace(Regex("[\\x00-\\x1f:*?\"<>|]"), "_")
+            ?.trim()?.trimStart('.')
+            ?.take(200)
+        return if (base.isNullOrBlank()) "file_${System.currentTimeMillis()}" else base
+    }
+
+    /** Never overwrite an existing file: append " (n)" before the extension. */
+    private fun uniqueFile(dir: java.io.File, name: String): java.io.File {
+        var file = java.io.File(dir, name)
+        val stem = name.substringBeforeLast('.', name)
+        val ext = if (name.contains('.')) "." + name.substringAfterLast('.') else ""
+        var n = 1
+        while (file.exists()) file = java.io.File(dir, "$stem (${n++})$ext")
+        return file
     }
 
     private fun makeCall(number: String) {
@@ -766,7 +847,7 @@ class SynapseService : Service() {
                     )
                 )
                 transferManager.sendPacket(packet)
-                Log.d(TAG, "Sent clipboard: ${text.take(50)}...")
+                Log.d(TAG, "Sent clipboard (${text.length} chars)")
             } catch (e: Exception) {
                 Log.e(TAG, "Send clipboard error", e)
             }
@@ -794,7 +875,7 @@ class SynapseService : Service() {
                     )
                 )
                 transferManager.sendPacket(packet)
-                Log.d(TAG, "Sent notification: [$appName] $title")
+                Log.d(TAG, "Sent notification from $packageName")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send notification", e)
             }

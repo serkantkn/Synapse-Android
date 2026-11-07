@@ -99,7 +99,7 @@ class SynapseNotificationListener : NotificationListenerService() {
         // Get app icon as Base64
         val iconBase64 = getAppIconBase64(packageName)
 
-        Log.d(TAG, "Forwarding notification: [$appName] $title — $text")
+        Log.d(TAG, "Forwarding notification from $appName")
 
         // Send to SynapseService
         synapseService?.sendNotification(

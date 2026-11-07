@@ -52,6 +52,7 @@ fun PairingScreen(
     onBack: () -> Unit
 ) {
     val connectionStatus by viewModel.connectionStatus.collectAsState()
+    val errorMessage by viewModel.errorMessage.collectAsState()
     val discoveredDevices by viewModel.discoveredDevices.collectAsState()
     val context = LocalContext.current
 
@@ -127,21 +128,30 @@ fun PairingScreen(
                 SegmentedButton(
                     selected = !showPinEntry,
                     onClick = { showPinEntry = false; selectedDevice = null },
-                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                    icon = { SegmentedButtonDefaults.Icon(active = !showPinEntry) { Icon(Icons.Filled.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp)) } }
                 ) {
-                    Icon(Icons.Filled.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
                     Text("QR Tara")
                 }
                 SegmentedButton(
                     selected = showPinEntry,
                     onClick = { showPinEntry = true },
-                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                    icon = { SegmentedButtonDefaults.Icon(active = showPinEntry) { Icon(Icons.Filled.Pin, contentDescription = null, modifier = Modifier.size(18.dp)) } }
                 ) {
-                    Icon(Icons.Filled.Pin, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
                     Text("Cihaz Listesi")
                 }
+            }
+
+            // Pairing failures (wrong PIN, rejected token...) are reported here, not only on Home.
+            errorMessage?.let { msg ->
+                Text(
+                    msg,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
 
             AnimatedContent(

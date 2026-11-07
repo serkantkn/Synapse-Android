@@ -32,6 +32,7 @@ class TcpTransferManager : TransferRepository {
     companion object {
         private const val TAG = "TcpTransfer"
         const val MAX_FRAME_SIZE = 10_000_000
+        private val HANDSHAKE_TYPES = setOf(PacketType.HANDSHAKE_REQUEST, PacketType.HANDSHAKE_RESPONSE)
     }
 
     private val gson = Gson()
@@ -124,6 +125,12 @@ class TcpTransferManager : TransferRepository {
             try {
                 while (socket.isConnected && !socket.isClosed) {
                     val packet = readPacket() ?: continue // unknown/malformed packet: skip it
+                    // Until a session key exists only the plaintext handshake is allowed: anything
+                    // else (CALL_COMMAND, SMS_COMMAND, REMOTE_INPUT...) from an unauthenticated peer is dropped.
+                    if (encryptionKey == null && packet.type !in HANDSHAKE_TYPES) {
+                        Log.w(TAG, "⛔ Dropped ${packet.type} received before the secure session was established")
+                        continue
+                    }
                     if (packet.type == PacketType.HANDSHAKE_RESPONSE) {
                         handshakeKeyProvider?.invoke(packet)?.let { encryptionKey = it }
                     }
@@ -158,9 +165,12 @@ class TcpTransferManager : TransferRepository {
                 val jsonBytes = json.toByteArray(Charsets.UTF_8)
 
                 val dataToSend = if (encrypt) {
-                    encryptionKey?.let { key ->
-                        CryptoManager.encrypt(jsonBytes, key)
-                    } ?: jsonBytes
+                    // Never fall back to plaintext: without a session key the packet is not sent.
+                    val key = encryptionKey ?: run {
+                        Log.w(TAG, "⛔ Not sending ${packet.type}: no secure session yet")
+                        return@withContext
+                    }
+                    CryptoManager.encrypt(jsonBytes, key)
                 } else {
                     jsonBytes
                 }
@@ -170,7 +180,7 @@ class TcpTransferManager : TransferRepository {
                         stream.writeInt(dataToSend.size)
                         stream.write(dataToSend)
                         stream.flush()
-                        val prefix = if (encrypt && encryptionKey != null) "🔒" else "🔓"
+                        val prefix = if (encrypt) "🔒" else "🔓"
                         Log.d(TAG, "$prefix Sent: ${packet.type} (${dataToSend.size} bytes)")
                     }
                 }
