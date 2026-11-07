@@ -31,6 +31,7 @@ import com.serkantkn.synapse.MainActivity
 import com.serkantkn.synapse.R
 import com.serkantkn.synapse.core.util.generatePairingCode
 import com.serkantkn.synapse.data.network.crypto.CryptoManager
+import com.serkantkn.synapse.data.network.crypto.PairingTokenStore
 import com.serkantkn.synapse.data.network.nsd.NsdDiscoveryManager
 import com.serkantkn.synapse.data.network.socket.TcpTransferManager
 import com.serkantkn.synapse.domain.model.ConnectionStatus
@@ -176,16 +177,27 @@ class SynapseService : Service() {
 
     // Pairing token per peer, derived from the first PIN-authenticated session. Reconnects prove
     // knowledge of it instead of a PIN; it also feeds the session key, so an impostor using the
-    // same device id can't derive the key.
-    private fun getPairingToken(deviceId: String): String? = prefs.getString("$KEY_TOKEN_PREFIX$deviceId", null)
+    // same device id can't derive the key. Kept Keystore-encrypted, outside plain prefs and backups.
+    private val tokenStore by lazy { PairingTokenStore(this).also { migratePlaintextTokens(it) } }
 
-    private fun savePairingToken(deviceId: String, token: String) {
-        prefs.edit().putString("$KEY_TOKEN_PREFIX$deviceId", token).apply()
+    /** Moves tokens written in plaintext by earlier builds into the encrypted store. */
+    private fun migratePlaintextTokens(store: PairingTokenStore) {
+        val legacy = prefs.all.filterKeys { it.startsWith(KEY_TOKEN_PREFIX) }
+        if (legacy.isEmpty()) return
+        val editor = prefs.edit()
+        legacy.forEach { (key, value) ->
+            (value as? String)?.let { store.put(key.removePrefix(KEY_TOKEN_PREFIX), it) }
+            editor.remove(key)
+        }
+        editor.apply()
+        Log.d(TAG, "🔐 Migrated ${legacy.size} pairing token(s) to the encrypted store")
     }
 
-    private fun removePairingToken(deviceId: String) {
-        prefs.edit().remove("$KEY_TOKEN_PREFIX$deviceId").apply()
-    }
+    private fun getPairingToken(deviceId: String): String? = tokenStore.get(deviceId)
+
+    private fun savePairingToken(deviceId: String, token: String) = tokenStore.put(deviceId, token)
+
+    private fun removePairingToken(deviceId: String) = tokenStore.remove(deviceId)
 
     // Manual-IP / QR targets have placeholder ids, so remember which peer id answered at an address.
     private fun peerIdForAddress(ip: String, port: Int): String? = prefs.getString("peer_at_$ip:$port", null)
