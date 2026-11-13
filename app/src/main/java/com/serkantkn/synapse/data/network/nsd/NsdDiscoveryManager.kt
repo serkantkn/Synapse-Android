@@ -22,9 +22,10 @@ class NsdDiscoveryManager(private val context: Context) : DiscoveryRepository {
 
     companion object {
         private const val TAG = "NsdDiscovery"
-        const val SERVICE_TYPE = "_synapse._tcp"
         const val SERVICE_NAME = "Synapse"
     }
+
+    var serviceType = "_synapse._tcp."
 
     private val nsdManager: NsdManager by lazy {
         context.getSystemService(Context.NSD_SERVICE) as NsdManager
@@ -113,7 +114,7 @@ class NsdDiscoveryManager(private val context: Context) : DiscoveryRepository {
 
         val serviceInfo = NsdServiceInfo().apply {
             serviceName = SERVICE_NAME
-            serviceType = SERVICE_TYPE
+            serviceType = this@NsdDiscoveryManager.serviceType
             setPort(port)
             setAttribute("device_id", deviceId)
             setAttribute("device_type", "android")
@@ -172,20 +173,20 @@ class NsdDiscoveryManager(private val context: Context) : DiscoveryRepository {
             }
 
             override fun onDiscoveryStopped(serviceType: String) {}
-            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+            override fun onStartDiscoveryFailed(serviceTypeStarted: String, errorCode: Int) {
                 Log.e(TAG, "❌ Discovery start failed: $errorCode")
                 // Retry after delay
                 handler.postDelayed({
                     try {
-                        nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+                        nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
                     } catch (_: Exception) {}
                 }, 3000)
             }
-            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
+            override fun onStopDiscoveryFailed(serviceTypeStarted: String, errorCode: Int) {}
         }
 
         try {
-            nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+            nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start discovery", e)
         }

@@ -67,8 +67,58 @@ class SynapseAccessibilityService : AccessibilityService() {
             "BACK" -> performGlobalAction(GLOBAL_ACTION_BACK)
             "HOME" -> performGlobalAction(GLOBAL_ACTION_HOME)
             "RECENTS" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+            "KEYBOARD" -> {
+                // Key and type are extracted in SynapseService, but executeRemoteAction signature 
+                // only takes action. We need to refactor executeRemoteAction or add a new method.
+            }
             else -> Log.w(TAG, "Unknown action: $action")
         }
+    }
+
+    /**
+     * Executes a keyboard input command.
+     * @param key The key string or special key name
+     * @param type "STRING" or "SPECIAL"
+     */
+    fun executeKeyboardAction(key: String, type: String) {
+        val rootNode = rootInActiveWindow ?: return
+        val focusedNode = rootNode.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+        
+        if (focusedNode == null) {
+            Log.w(TAG, "No input field focused for keyboard action")
+            rootNode.recycle()
+            return
+        }
+
+        if (type == "SPECIAL") {
+            when (key) {
+                "BACKSPACE" -> {
+                    val currentText = focusedNode.text?.toString() ?: ""
+                    if (currentText.isNotEmpty()) {
+                        val newText = currentText.substring(0, currentText.length - 1)
+                        val arguments = android.os.Bundle()
+                        arguments.putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
+                        focusedNode.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+                    }
+                }
+                "ENTER" -> {
+                    val currentText = focusedNode.text?.toString() ?: ""
+                    val newText = currentText + "\n"
+                    val arguments = android.os.Bundle()
+                    arguments.putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
+                    focusedNode.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+                }
+            }
+        } else if (type == "STRING") {
+            val currentText = focusedNode.text?.toString() ?: ""
+            val newText = currentText + key
+            val arguments = android.os.Bundle()
+            arguments.putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
+            focusedNode.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        }
+        
+        focusedNode.recycle()
+        rootNode.recycle()
     }
 
     private fun performTap(x: Float, y: Float) {

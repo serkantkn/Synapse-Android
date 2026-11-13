@@ -1,19 +1,17 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Pairing state is bound to this device: the device id, known peers and the
+   Keystore-encrypted pairing tokens must never be restored elsewhere, or a
+   backup could be used to impersonate this phone. Other prefs (e.g. the
+   notification filter) are still backed up.
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="sharedpref" path="synapse_prefs.xml" />
+        <exclude domain="sharedpref" path="synapse_secure_prefs.xml" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="sharedpref" path="synapse_prefs.xml" />
+        <exclude domain="sharedpref" path="synapse_secure_prefs.xml" />
     </device-transfer>
-    -->
 </data-extraction-rules>

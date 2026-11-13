@@ -11,23 +11,38 @@ import android.provider.Settings
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.*
+import androidx.compose.material.icons.rounded.Notifications
+import androidx.compose.material.icons.rounded.Warning
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.kyant.shapes.RoundedRectangle
+import com.serkantkn.synapse.ui.glass.GlassButton
+import com.serkantkn.synapse.ui.glass.GlassCard
+import com.serkantkn.synapse.ui.glass.GlassScaffold
+import com.serkantkn.synapse.ui.glass.GlassTopBar
+import com.serkantkn.synapse.ui.glass.GroupedRow
+import com.serkantkn.synapse.ui.glass.IconTile
+import com.serkantkn.synapse.ui.glass.IosSwitch
+import com.serkantkn.synapse.ui.glass.LargeTitle
+import com.serkantkn.synapse.ui.glass.RowPosition
+import com.serkantkn.synapse.ui.glass.SecondaryText
+import com.serkantkn.synapse.ui.glass.SectionHeader
+import com.serkantkn.synapse.ui.glass.rowPosition
+import com.serkantkn.synapse.ui.theme.Apple
+import com.serkantkn.synapse.ui.theme.AppleType
 
 data class AppFilterItem(
     val packageName: String,
@@ -36,189 +51,131 @@ data class AppFilterItem(
     val isEnabled: Boolean
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NotificationFilterScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("notification_filter_prefs", Context.MODE_PRIVATE) }
+    val colors = Apple.colors
 
-    // Check if notification listener is enabled
-    val isListenerEnabled = remember {
-        mutableStateOf(isNotificationListenerEnabled(context))
+    // Re-checked on resume: the user may grant access in Settings and come back.
+    var isListenerEnabled by remember { mutableStateOf(isNotificationListenerEnabled(context)) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) isListenerEnabled = isNotificationListenerEnabled(context)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // Load installed apps
-    val apps = remember {
-        loadInstalledApps(context, prefs)
-    }
-
+    val apps = remember { loadInstalledApps(context, prefs) }
     var filterState by remember { mutableStateOf(apps) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Bildirim Ayarları") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Geri")
-                    }
-                }
-            )
-        }
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+    val listState = rememberLazyListState()
+    val showTitle by remember {
+        derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 60 }
+    }
+
+    GlassScaffold(
+        topBar = { GlassTopBar(title = "Bildirimler", showTitle = showTitle, onBack = onBack) }
+    ) { padding ->
+        val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = padding.calculateTopPadding(), bottom = bottom + 32.dp),
         ) {
-            // Notification Access Warning
-            if (!isListenerEnabled.value) {
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer
-                    ),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Warning,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                "Bildirim Erişimi Gerekli",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                "Bildirimleri Mac'e iletebilmek için erişim izni vermeniz gerekiyor.",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                        FilledTonalButton(
-                            onClick = {
-                                context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            item {
+                LargeTitle("Bildirimler", subtitle = "Seçtiğin uygulamaların bildirimleri Mac'e iletilir.")
+                Spacer(Modifier.height(18.dp))
+            }
+
+            if (!isListenerEnabled) {
+                item {
+                    GlassCard(tint = colors.orange.copy(alpha = 0.12f)) {
+                        Row(verticalAlignment = Alignment.Top) {
+                            IconTile(Icons.Rounded.Warning, colors.orange, size = 36.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("Bildirim erişimi gerekli", style = AppleType.headline, color = colors.label)
+                                SecondaryText("Bildirimleri Mac'e iletebilmek için Synapse'e bildirim erişimi ver.", style = AppleType.footnote)
                             }
-                        ) {
-                            Text("İzin Ver")
                         }
+                        Spacer(Modifier.height(14.dp))
+                        GlassButton(
+                            "İzin Ver",
+                            onClick = { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
+                            prominent = true,
+                            tint = colors.orange,
+                            large = false
+                        )
                     }
+                    Spacer(Modifier.height(18.dp))
                 }
             }
 
-            // Info card
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                ),
-                shape = RoundedCornerShape(16.dp)
-            ) {
+            item {
                 Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        Icons.Default.Notifications,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
+                    SectionHeader(
+                        "${filterState.count { it.isEnabled }} / ${filterState.size} uygulama",
+                        modifier = Modifier.weight(1f)
                     )
-                    Text(
-                        "Seçtiğiniz uygulamaların bildirimleri Mac'inize iletilecektir.",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-            }
-
-            // Select All / Deselect All
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "${filterState.count { it.isEnabled }} / ${filterState.size} uygulama seçili",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = {
+                    GlassButton("Tümü", onClick = {
                         filterState = filterState.map { it.copy(isEnabled = true) }
                         saveFilter(prefs, filterState)
-                    }) { Text("Tümünü Seç") }
-                    TextButton(onClick = {
+                    }, large = false)
+                    Spacer(Modifier.width(8.dp))
+                    GlassButton("Hiçbiri", onClick = {
                         filterState = filterState.map { it.copy(isEnabled = false) }
                         saveFilter(prefs, filterState)
-                    }) { Text("Temizle") }
+                    }, large = false)
                 }
+                Spacer(Modifier.height(8.dp))
             }
 
-            // App list
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                items(filterState, key = { it.packageName }) { app ->
-                    AppFilterRow(
-                        app = app,
-                        onToggle = { enabled ->
-                            filterState = filterState.map {
-                                if (it.packageName == app.packageName) it.copy(isEnabled = enabled) else it
-                            }
-                            saveFilter(prefs, filterState)
+            itemsIndexed(filterState, key = { _, app -> app.packageName }) { index, app ->
+                AppFilterRow(
+                    app = app,
+                    position = rowPosition(index, filterState.size),
+                    onToggle = { enabled ->
+                        filterState = filterState.map {
+                            if (it.packageName == app.packageName) it.copy(isEnabled = enabled) else it
                         }
-                    )
-                }
+                        saveFilter(prefs, filterState)
+                    }
+                )
             }
         }
     }
 }
 
 @Composable
-private fun AppFilterRow(app: AppFilterItem, onToggle: (Boolean) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+private fun AppFilterRow(app: AppFilterItem, position: RowPosition, onToggle: (Boolean) -> Unit) {
+    GroupedRow(
+        position = position,
+        leading = {
+            app.icon?.let {
+                Image(
+                    bitmap = it.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.size(32.dp).clip(RoundedRectangle(8.dp))
+                )
+            } ?: IconTile(Icons.Rounded.Notifications, Apple.colors.gray, size = 32.dp)
+        },
+        trailing = { IosSwitch(checked = app.isEnabled, onCheckedChange = onToggle) }
     ) {
-        // App Icon
-        app.icon?.let {
-            Image(
-                bitmap = it.asImageBitmap(),
-                contentDescription = app.appName,
-                modifier = Modifier.size(40.dp).clip(CircleShape)
-            )
-        } ?: Box(
-            modifier = Modifier.size(40.dp).clip(CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(Icons.Default.Notifications, contentDescription = null)
-        }
-
-        // App name
         Text(
             text = app.appName,
-            style = MaterialTheme.typography.bodyLarge,
+            style = AppleType.body,
+            color = Apple.colors.label,
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-
-        // Toggle
-        Switch(
-            checked = app.isEnabled,
-            onCheckedChange = onToggle
+            overflow = TextOverflow.Ellipsis
         )
     }
 }

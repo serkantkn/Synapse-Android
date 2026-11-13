@@ -60,7 +60,9 @@ class SynapseViewModel(application: Application) : AndroidViewModel(application)
             synapseService = binder.getService()
             isBound = true
             Log.d(TAG, "✅ Bound to SynapseService")
-            startDiscovery() // Start discovery automatically on launch
+            // No search before a platform is picked: a paired Mac nearby would otherwise be
+            // reconnected while the selection screen is still open, even if the user picks iOS.
+            if (platformChosen && !demo) selectPlatformOnService()
             startCollectingServiceState()
         }
 
@@ -85,26 +87,57 @@ class SynapseViewModel(application: Application) : AndroidViewModel(application)
     private fun startCollectingServiceState() {
         val service = synapseService ?: return
 
+        // In demo mode the fake state stays on screen; the service must not overwrite it.
         viewModelScope.launch {
-            service.connectionStatus.collect { _connectionStatus.value = it }
+            service.connectionStatus.collect { if (!demo) _connectionStatus.value = it }
         }
         viewModelScope.launch {
-            service.discoveredDevices.collect { _discoveredDevices.value = it }
+            service.discoveredDevices.collect { if (!demo) _discoveredDevices.value = it }
         }
         viewModelScope.launch {
-            service.connectedDevice.collect { _connectedDevice.value = it }
+            service.connectedDevice.collect { if (!demo) _connectedDevice.value = it }
         }
         viewModelScope.launch {
             service.pairingCode.collect { _pairingCode.value = it }
         }
         viewModelScope.launch {
-            service.clipboardContent.collect { _clipboardContent.value = it }
+            service.clipboardContent.collect { if (!demo) _clipboardContent.value = it }
         }
         viewModelScope.launch {
-            service.incomingClipboard.collect { _incomingClipboard.value = it }
+            service.incomingClipboard.collect { if (!demo) _incomingClipboard.value = it }
         }
         viewModelScope.launch {
-            service.errorMessage.collect { _errorMessage.value = it }
+            service.errorMessage.collect { if (!demo) _errorMessage.value = it }
+        }
+    }
+
+    private var demo = false
+
+    /**
+     * Fake state for UI screenshots; MainActivity only calls this in debuggable builds.
+     * "connected": paired with a Mac. "devices": searching, two devices found.
+     */
+    fun startDemo(mode: String) {
+        demo = true
+        val mac = Device(id = "demo-mac", name = "MacBook Air", deviceType = "macOS", ipAddress = "192.168.1.14", port = 9876)
+        when (mode) {
+            "connected" -> {
+                _connectedDevice.value = mac
+                _clipboardContent.value = "https://synapse.example/davet/8f2c"
+                _incomingClipboard.value = "Kapı kodu: 4821#"
+                _connectionStatus.value = ConnectionStatus.CONNECTED
+            }
+            "devices" -> {
+                _discoveredDevices.value = listOf(
+                    mac,
+                    Device(id = "demo-ios", name = "Serkan'ın iPhone'u", deviceType = "iOS", ipAddress = "192.168.1.15", port = 55673)
+                )
+                _connectionStatus.value = ConnectionStatus.DISCOVERING
+            }
+            "error" -> {
+                _errorMessage.value = "PIN kodu yanlış. Mac'te görünen 6 haneli kodu tekrar gir."
+                _connectionStatus.value = ConnectionStatus.ERROR
+            }
         }
     }
 
@@ -130,10 +163,6 @@ class SynapseViewModel(application: Application) : AndroidViewModel(application)
         synapseService?.pairWithIp(ip, pin)
     }
 
-    fun acceptPairing(incomingPacket: Packet) {
-        synapseService?.acceptPairing(incomingPacket)
-    }
-
     fun rejectPairing() {
         synapseService?.rejectPairing()
     }
@@ -151,7 +180,29 @@ class SynapseViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun clearError() {
+        if (demo) _errorMessage.value = null
         synapseService?.clearError()
+    }
+
+    // Target platform selection
+    private val _targetPlatform = MutableStateFlow("macOS")
+    val targetPlatform: StateFlow<String> = _targetPlatform.asStateFlow()
+
+    /** Set once the user picks a platform; discovery (and auto-reconnect) waits for it. */
+    private var platformChosen = false
+
+    fun setTargetPlatform(platform: String) {
+        _targetPlatform.value = platform
+        platformChosen = true
+        Log.d(TAG, "🎯 Target platform set to: $platform")
+        if (!demo) selectPlatformOnService() // a bind that's still pending does it on connect
+    }
+
+    private fun selectPlatformOnService() {
+        // iOS advertises _synapse_ios._tcp, the Mac _synapse._tcp.
+        synapseService?.selectTargetServiceType(
+            if (_targetPlatform.value == "iOS") "_synapse_ios._tcp." else "_synapse._tcp."
+        )
     }
 
     override fun onCleared() {

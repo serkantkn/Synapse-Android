@@ -19,6 +19,9 @@ interface TransferRepository {
     /** Receive incoming packets as a flow. */
     fun receivePackets(): Flow<Packet>
 
-    /** Disconnect and clean up resources. */
+    /** Close the active peer connection (server keeps listening). */
     fun disconnect()
+
+    /** Close the peer connection and stop listening. */
+    fun stopServer()
 }

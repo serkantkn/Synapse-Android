@@ -1,44 +1,101 @@
 package com.serkantkn.synapse.presentation.screens
 
-import androidx.compose.animation.*
-import androidx.compose.animation.core.*
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.rounded.AccessibilityNew
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentPaste
+import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Laptop
+import androidx.compose.material.icons.rounded.LinkOff
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Notifications
+import androidx.compose.material.icons.rounded.PhoneIphone
+import androidx.compose.material.icons.rounded.QrCodeScanner
+import androidx.compose.material.icons.rounded.Radar
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.WifiFind
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.kyant.shapes.RoundedRectangle
 import com.serkantkn.synapse.domain.model.ConnectionStatus
 import com.serkantkn.synapse.domain.model.Device
 import com.serkantkn.synapse.presentation.viewmodel.SynapseViewModel
+import com.serkantkn.synapse.ui.glass.GlassButton
+import com.serkantkn.synapse.ui.glass.GlassCard
+import com.serkantkn.synapse.ui.glass.GlassIconButton
+import com.serkantkn.synapse.ui.glass.GlassScaffold
+import com.serkantkn.synapse.ui.glass.GlassTopBar
+import com.serkantkn.synapse.ui.glass.GradientIcon
+import com.serkantkn.synapse.ui.glass.GroupedRow
+import com.serkantkn.synapse.ui.glass.IconTile
+import com.serkantkn.synapse.ui.glass.LargeTitle
+import com.serkantkn.synapse.ui.glass.RowPosition
+import com.serkantkn.synapse.ui.glass.SecondaryText
+import com.serkantkn.synapse.ui.glass.SectionHeader
+import com.serkantkn.synapse.ui.glass.StatusBadge
+import com.serkantkn.synapse.ui.glass.StepRow
+import com.serkantkn.synapse.ui.glass.glass
+import com.serkantkn.synapse.ui.glass.tint
+import com.serkantkn.synapse.ui.theme.Apple
+import com.serkantkn.synapse.ui.theme.AppleType
+import com.serkantkn.synapse.ui.theme.SynapseBlue
+import com.serkantkn.synapse.ui.theme.SynapseCyan
 
-// Premium color palette
-private val Cyan400 = Color(0xFF26C6DA)
-private val Blue500 = Color(0xFF2196F3)
-private val Green400 = Color(0xFF66BB6A)
-private val Red400 = Color(0xFFEF5350)
-private val Amber400 = Color(0xFFFFCA28)
-private val SurfaceDark = Color(0xFF0F1318)
-private val CardDark = Color(0xFF1A1F27)
-private val CardBorder = Color(0xFF2A3040)
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     viewModel: SynapseViewModel,
@@ -50,320 +107,318 @@ fun HomeScreen(
     val clipboardContent by viewModel.clipboardContent.collectAsState()
     val incomingClipboard by viewModel.incomingClipboard.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
+    val platform by viewModel.targetPlatform.collectAsState()
+    val peer = if (platform == "iOS") "iPhone" else "Mac"
 
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 0.85f, targetValue = 1.15f,
-        animationSpec = infiniteRepeatable(tween(1400, easing = EaseInOutCubic), RepeatMode.Reverse),
-        label = "pulseScale"
-    )
+    val context = LocalContext.current
+    var isAccessibilityActive by remember { mutableStateOf(true) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isAccessibilityActive = com.serkantkn.synapse.data.service.SynapseAccessibilityService.instance != null
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
-    Scaffold(
-        containerColor = SurfaceDark,
+    val listState = rememberLazyListState()
+    val showTitle by remember {
+        derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 60 }
+    }
+    val isConnected = connectionStatus == ConnectionStatus.CONNECTED
+
+    GlassScaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Box(
-                            modifier = Modifier.size(32.dp).clip(RoundedCornerShape(8.dp))
-                                .background(Brush.linearGradient(listOf(Cyan400, Blue500))),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(Icons.Filled.Hub, null, tint = Color.White, modifier = Modifier.size(18.dp))
-                        }
-                        Text("Synapse", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                    }
-                },
-                actions = {
-                    StatusPill(connectionStatus)
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = SurfaceDark)
-            )
+            GlassTopBar(title = "Synapse", showTitle = showTitle) {
+                StatusBadge(connectionStatus)
+            }
         }
     ) { padding ->
+        val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
         LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            contentPadding = PaddingValues(vertical = 12.dp)
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = 20.dp, end = 20.dp,
+                top = padding.calculateTopPadding(),
+                bottom = bottom + 32.dp
+            ),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Error
+            item { LargeTitle("Synapse", subtitle = if (platform == "iOS") "iPhone / iPad ile" else "Mac ile") }
+
             item {
-                AnimatedVisibility(visible = errorMessage != null, enter = slideInVertically() + fadeIn(), exit = slideOutVertically() + fadeOut()) {
-                    GlassCard(containerColor = Red400.copy(alpha = 0.12f), borderColor = Red400.copy(alpha = 0.3f)) {
-                        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.ErrorOutline, null, tint = Red400)
-                            Spacer(Modifier.width(10.dp))
-                            Text(errorMessage ?: "", modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.9f), fontSize = 13.sp)
-                            IconButton(onClick = { viewModel.clearError() }) { Icon(Icons.Filled.Close, "Kapat", tint = Color.White.copy(alpha = 0.5f)) }
-                        }
-                    }
+                AnimatedVisibility(
+                    visible = errorMessage != null,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    ErrorCard(errorMessage.orEmpty(), onDismiss = { viewModel.clearError() })
                 }
             }
 
-            // Status Hero
             item {
                 StatusHeroCard(
-                    status = connectionStatus, device = connectedDevice, pulseScale = pulseScale,
-                    onDiscover = { viewModel.startDiscovery() }, onStop = { viewModel.stopDiscovery() },
-                    onDisconnect = { viewModel.disconnect() }, onPair = onNavigateToPairing
+                    status = connectionStatus,
+                    device = connectedDevice,
+                    peer = peer,
+                    onDiscover = { viewModel.startDiscovery() },
+                    onStop = { viewModel.stopDiscovery() },
+                    onDisconnect = { viewModel.disconnect() },
+                    onPair = onNavigateToPairing
                 )
             }
 
-            // Connected features
-            if (connectionStatus == ConnectionStatus.CONNECTED) {
-                // Quick Stats
+            if (!isAccessibilityActive && platform != "iOS") {
+                item {
+                    AccessibilityCard(onEnable = {
+                        try {
+                            context.startActivity(android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                        } catch (_: Exception) {
+                        }
+                    })
+                }
+            }
+
+            if (isConnected) {
                 item {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        StatChip(Modifier.weight(1f), Icons.Filled.ContentPaste, "Pano", if (clipboardContent.isNotBlank()) "Aktif" else "—", Cyan400)
-                        StatChip(Modifier.weight(1f), Icons.Filled.Notifications, "Bildirim", "Açık", Amber400)
-                        StatChip(Modifier.weight(1f), Icons.Filled.Wifi, "Bağlantı", "Kararlı", Green400)
+                        StatTile(Modifier.weight(1f), Icons.Rounded.ContentPaste, "Pano",
+                            if (clipboardContent.isNotBlank()) "Etkin" else "—", SynapseCyan)
+                        StatTile(Modifier.weight(1f), Icons.Rounded.Notifications, "Bildirim", "Açık", Apple.colors.orange)
+                        StatTile(Modifier.weight(1f), Icons.Rounded.Lock, "Bağlantı", "Şifreli", Apple.colors.green)
                     }
                 }
-
-                // Clipboard
                 item { ClipboardCard(clipboardContent, incomingClipboard) }
-
-                // Settings row
                 item {
-                    GlassCard {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(4.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly
+                    Column {
+                        SectionHeader("Ayarlar")
+                        GroupedRow(
+                            position = RowPosition.Single,
+                            onClick = onNavigateToNotificationFilter,
+                            leading = { IconTile(Icons.Rounded.Notifications, Apple.colors.red, size = 32.dp) }
                         ) {
-                            TextButton(onClick = onNavigateToNotificationFilter) {
-                                Icon(Icons.Filled.Notifications, null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Bildirim Ayarları", fontSize = 12.sp)
-                            }
+                            Text("Bildirim Ayarları", style = AppleType.body, color = Apple.colors.label)
+                            SecondaryText("$peer'e iletilecek uygulamalar", style = AppleType.footnote)
                         }
                     }
                 }
+            } else if (connectionStatus != ConnectionStatus.PAIRING) {
+                item { HowToCard(platform) }
             }
         }
     }
 }
 
-// MARK: - Status Pill
+// MARK: - Status hero
 
 @Composable
-fun StatusPill(status: ConnectionStatus) {
-    val (color, label) = when (status) {
-        ConnectionStatus.CONNECTED -> Green400 to "Bağlı"
-        ConnectionStatus.DISCOVERING -> Amber400 to "Arıyor"
-        ConnectionStatus.PAIRING -> Blue500 to "Eşleşiyor"
-        ConnectionStatus.ERROR -> Red400 to "Hata"
-        ConnectionStatus.DISCONNECTED -> Color.Gray to "Çevrimdışı"
-    }
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = color.copy(alpha = 0.15f),
-        border = androidx.compose.foundation.BorderStroke(1.dp, color.copy(alpha = 0.3f))
-    ) {
-        Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(color))
-            Spacer(Modifier.width(6.dp))
-            Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = color)
-        }
-    }
-}
-
-// MARK: - Status Hero
-
-@Composable
-fun StatusHeroCard(
-    status: ConnectionStatus, device: Device?, pulseScale: Float,
-    onDiscover: () -> Unit, onStop: () -> Unit, onDisconnect: () -> Unit, onPair: () -> Unit
+private fun StatusHeroCard(
+    status: ConnectionStatus,
+    device: Device?,
+    peer: String,
+    onDiscover: () -> Unit,
+    onStop: () -> Unit,
+    onDisconnect: () -> Unit,
+    onPair: () -> Unit,
 ) {
-    GlassCard {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // Animated icon
-            Box(
-                modifier = Modifier.size(72.dp)
-                    .then(if (status == ConnectionStatus.DISCOVERING) Modifier.scale(pulseScale) else Modifier)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.radialGradient(
-                            when (status) {
-                                ConnectionStatus.CONNECTED -> listOf(Green400.copy(0.25f), Green400.copy(0.05f))
-                                ConnectionStatus.DISCOVERING -> listOf(Amber400.copy(0.25f), Amber400.copy(0.05f))
-                                else -> listOf(Color.Gray.copy(0.15f), Color.Gray.copy(0.03f))
-                            }
-                        )
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    when (status) {
-                        ConnectionStatus.CONNECTED -> Icons.Filled.LinkOff
-                        ConnectionStatus.DISCOVERING -> Icons.Filled.Radar
-                        ConnectionStatus.PAIRING -> Icons.Filled.QrCode2
-                        else -> Icons.Filled.WifiFind
-                    },
-                    null, modifier = Modifier.size(30.dp),
-                    tint = when (status) {
-                        ConnectionStatus.CONNECTED -> Green400
-                        ConnectionStatus.DISCOVERING -> Amber400
-                        else -> Color.White.copy(0.6f)
-                    }
-                )
-            }
-
-            Spacer(Modifier.height(14.dp))
-
+    val colors = Apple.colors
+    GlassCard(cornerRadius = 30.dp, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 26.dp)) {
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            BeaconOrb(
+                icon = when (status) {
+                    ConnectionStatus.CONNECTED -> if (peer == "iPhone") Icons.Rounded.PhoneIphone else Icons.Rounded.Laptop
+                    ConnectionStatus.DISCOVERING -> Icons.Rounded.Radar
+                    ConnectionStatus.PAIRING -> Icons.Rounded.Key
+                    ConnectionStatus.ERROR -> Icons.Rounded.ErrorOutline
+                    ConnectionStatus.DISCONNECTED -> Icons.Rounded.WifiFind
+                },
+                tint = status.tint(),
+                rippling = status == ConnectionStatus.DISCOVERING
+            )
+            Spacer(Modifier.height(18.dp))
             Text(
                 when (status) {
                     ConnectionStatus.CONNECTED -> "Bağlandı"
-                    ConnectionStatus.DISCOVERING -> "Aranıyor..."
-                    ConnectionStatus.PAIRING -> "Eşleşiyor..."
-                    ConnectionStatus.ERROR -> "Hata"
-                    ConnectionStatus.DISCONNECTED -> "Bağlantı Yok"
+                    ConnectionStatus.DISCOVERING -> "$peer aranıyor…"
+                    ConnectionStatus.PAIRING -> "Eşleşiliyor…"
+                    ConnectionStatus.ERROR -> "Bağlanamadı"
+                    ConnectionStatus.DISCONNECTED -> "Bağlantı yok"
                 },
-                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                color = Color.White
+                style = AppleType.title2,
+                color = colors.label
             )
+            Spacer(Modifier.height(4.dp))
+            SecondaryText(
+                when (status) {
+                    ConnectionStatus.CONNECTED -> device?.name?.let { "$it · uçtan uca şifreli" } ?: "Uçtan uca şifreli"
+                    ConnectionStatus.DISCOVERING -> "$peer aynı Wi-Fi ağındaysa birazdan bulunur."
+                    ConnectionStatus.PAIRING -> "Güvenli bağlantı kuruluyor"
+                    ConnectionStatus.ERROR -> "Tekrar aramayı ya da eşleştirmeyi dene."
+                    ConnectionStatus.DISCONNECTED -> "Aramayı başlat ya da QR kodla eşleştir."
+                },
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(22.dp))
 
-            if (device != null) {
-                Text("${device.name}", fontSize = 13.sp, color = Color.White.copy(0.5f))
-            }
-
-            Spacer(Modifier.height(16.dp))
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 when (status) {
                     ConnectionStatus.DISCONNECTED, ConnectionStatus.ERROR -> {
-                        ActionButton("Keşfet", Icons.Filled.Search, Cyan400, onClick = onDiscover)
-                        ActionButton("QR Eşleş", Icons.Filled.QrCode, Blue500, onClick = onPair)
+                        GlassButton("Ara", onDiscover, Modifier.weight(1f), icon = Icons.Rounded.Search, prominent = true)
+                        GlassButton("Eşleştir", onPair, Modifier.weight(1f), icon = Icons.Rounded.QrCodeScanner)
                     }
                     ConnectionStatus.DISCOVERING -> {
-                        ActionButton("Durdur", Icons.Filled.Close, Color.Gray, onClick = onStop)
+                        GlassButton("Durdur", onStop, Modifier.weight(1f), icon = Icons.Rounded.Close, tint = colors.label)
+                        GlassButton("Eşleştir", onPair, Modifier.weight(1f), icon = Icons.Rounded.QrCodeScanner)
                     }
                     ConnectionStatus.CONNECTED -> {
-                        ActionButton("Bağlantıyı Kes", Icons.Filled.LinkOff, Red400, onClick = onDisconnect)
+                        GlassButton("Bağlantıyı Kes", onDisconnect, Modifier.weight(1f), icon = Icons.Rounded.LinkOff, tint = colors.red)
                     }
-                    else -> {}
+                    ConnectionStatus.PAIRING -> Unit
                 }
             }
         }
     }
 }
 
+/** Glass orb with the state icon; rings ripple outwards while searching. */
 @Composable
-fun ActionButton(label: String, icon: ImageVector, tint: Color, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = tint.copy(alpha = 0.15f), contentColor = tint),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
-    ) {
-        Icon(icon, null, modifier = Modifier.size(16.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-    }
-}
-
-// MARK: - Stat Chip
-
-@Composable
-fun StatChip(modifier: Modifier, icon: ImageVector, label: String, value: String, tint: Color) {
-    GlassCard(modifier = modifier) {
-        Column(
-            modifier = Modifier.padding(12.dp).fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
+private fun BeaconOrb(icon: ImageVector, tint: Color, rippling: Boolean) {
+    val transition = rememberInfiniteTransition(label = "ripple")
+    val phase by transition.animateFloat(
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(2600, easing = LinearEasing), RepeatMode.Restart),
+        label = "phase"
+    )
+    Box(Modifier.size(150.dp), contentAlignment = Alignment.Center) {
+        if (rippling) {
+            Canvas(Modifier.fillMaxSize()) {
+                val base = size.minDimension * 0.33f
+                repeat(3) { index ->
+                    val t = (phase + index / 3f) % 1f
+                    drawCircle(
+                        color = SynapseCyan.copy(alpha = (1f - t) * 0.55f),
+                        radius = base * (1f + t * 0.5f),
+                        style = Stroke(width = 1.5.dp.toPx())
+                    )
+                }
+            }
+        }
+        Box(
+            Modifier.size(100.dp).glass(CircleShape, tint = tint.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center
         ) {
-            Icon(icon, null, tint = tint, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.height(6.dp))
-            Text(value, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
-            Text(label, fontSize = 10.sp, color = Color.White.copy(0.4f))
+            GradientIcon(icon, Modifier.size(42.dp))
         }
     }
 }
 
-// MARK: - Clipboard Card
+// MARK: - Cards
 
 @Composable
-fun ClipboardCard(sent: String, received: String?) {
-    GlassCard {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.ContentPaste, null, tint = Cyan400, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Pano Senkronizasyonu", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Color.White)
-            }
-            Spacer(Modifier.height(12.dp))
-
-            if (sent.isNotBlank()) {
-                ClipItem("Gönderilen", sent, Icons.Filled.ArrowUpward, Green400)
-                Spacer(Modifier.height(8.dp))
-            }
-            if (received != null) {
-                ClipItem("Alınan", received, Icons.Filled.ArrowDownward, Blue500)
-            }
-            if (sent.isBlank() && received == null) {
-                Text("Kopyalanan metin otomatik senkronize edilir", fontSize = 12.sp, color = Color.White.copy(0.35f), modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
-            }
+private fun ErrorCard(message: String, onDismiss: () -> Unit) {
+    val colors = Apple.colors
+    GlassCard(tint = colors.red.copy(alpha = 0.14f), contentPadding = PaddingValues(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.ErrorOutline, contentDescription = null, tint = colors.red)
+            Spacer(Modifier.width(12.dp))
+            Text(message, style = AppleType.subheadline, color = colors.label, modifier = Modifier.weight(1f))
+            GlassIconButton(Icons.Rounded.Close, "Kapat", onDismiss, size = 36.dp, tint = colors.secondaryLabel)
         }
     }
 }
 
 @Composable
-fun ClipItem(direction: String, content: String, icon: ImageVector, color: Color) {
-    Surface(shape = RoundedCornerShape(10.dp), color = color.copy(alpha = 0.08f)) {
-        Row(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.Top) {
-            Icon(icon, null, tint = color, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(8.dp))
-            Column {
-                Text(direction, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = color)
-                Text(content, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Color.White.copy(0.7f))
-            }
-        }
-    }
-}
-
-// MARK: - Device Card (for discovered list)
-
-@Composable
-fun DeviceCard(device: Device, onPair: () -> Unit) {
-    GlassCard {
-        Row(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier.size(44.dp).clip(CircleShape).background(Cyan400.copy(alpha = 0.12f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    if (device.deviceType == "macOS") Icons.Filled.Laptop else Icons.Filled.PhoneAndroid,
-                    null, tint = Cyan400, modifier = Modifier.size(22.dp)
+private fun AccessibilityCard(onEnable: () -> Unit) {
+    val colors = Apple.colors
+    GlassCard(tint = colors.orange.copy(alpha = 0.12f)) {
+        Row(verticalAlignment = Alignment.Top) {
+            IconTile(Icons.Rounded.AccessibilityNew, colors.orange, size = 36.dp)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Erişilebilirlik servisi kapalı", style = AppleType.headline, color = colors.label)
+                Spacer(Modifier.height(4.dp))
+                SecondaryText(
+                    "Mac'ten ekran kontrolü, klavye ve sürükle-bırak dosya gönderimi için Synapse erişilebilirlik servisini aç.",
+                    style = AppleType.footnote
                 )
             }
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(device.name, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Color.White)
-                Text("${device.ipAddress}:${device.port}", fontSize = 11.sp, color = Color.White.copy(0.4f))
-            }
-            IconButton(onClick = onPair) {
-                Icon(Icons.Filled.ChevronRight, "Eşleş", tint = Color.White.copy(0.3f))
-            }
+        }
+        Spacer(Modifier.height(14.dp))
+        GlassButton("Şimdi Etkinleştir", onEnable, prominent = true, tint = colors.orange, large = false)
+    }
+}
+
+@Composable
+private fun StatTile(modifier: Modifier, icon: ImageVector, label: String, value: String, tint: Color) {
+    GlassCard(modifier = modifier, cornerRadius = 22.dp, contentPadding = PaddingValues(14.dp)) {
+        IconTile(icon, tint, size = 30.dp)
+        Spacer(Modifier.height(10.dp))
+        Text(value, style = AppleType.headline, color = Apple.colors.label, maxLines = 1)
+        Text(label, style = AppleType.caption, color = Apple.colors.secondaryLabel)
+    }
+}
+
+@Composable
+private fun ClipboardCard(sent: String, received: String?) {
+    val colors = Apple.colors
+    GlassCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconTile(Icons.Rounded.ContentPaste, SynapseCyan, size = 30.dp)
+            Spacer(Modifier.width(10.dp))
+            Text("Pano Senkronizasyonu", style = AppleType.headline, color = colors.label)
+        }
+        Spacer(Modifier.height(12.dp))
+        if (sent.isNotBlank()) {
+            ClipItem("Gönderilen", sent, Icons.Rounded.ArrowUpward, colors.green)
+        }
+        if (received != null) {
+            if (sent.isNotBlank()) Spacer(Modifier.height(8.dp))
+            ClipItem("Alınan", received, Icons.Rounded.ArrowDownward, SynapseBlue)
+        }
+        if (sent.isBlank() && received == null) {
+            SecondaryText("Kopyaladığın metin otomatik olarak eşitlenir.", style = AppleType.footnote)
         }
     }
 }
 
-// MARK: - Glass Card Component
+@Composable
+private fun ClipItem(direction: String, content: String, icon: ImageVector, color: Color) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(Apple.colors.fill.copy(alpha = 0.5f), RoundedRectangle(14.dp))
+            .padding(12.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(10.dp))
+        Column {
+            Text(direction, style = AppleType.caption.copy(fontWeight = FontWeight.SemiBold), color = color)
+            Text(content, style = AppleType.subheadline, color = Apple.colors.label, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
 
 @Composable
-fun GlassCard(
-    modifier: Modifier = Modifier,
-    containerColor: Color = CardDark,
-    borderColor: Color = CardBorder,
-    content: @Composable () -> Unit
-) {
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = containerColor,
-        border = androidx.compose.foundation.BorderStroke(0.5.dp, borderColor)
-    ) {
-        content()
+private fun HowToCard(platform: String) {
+    GlassCard {
+        Text("Nasıl bağlanır?", style = AppleType.headline, color = Apple.colors.label)
+        Spacer(Modifier.height(14.dp))
+        if (platform == "iOS") {
+            StepRow(1, "iPhone'da Synapse'i aç", "\"Yayını Başlat\"a dokun.")
+            Spacer(Modifier.height(14.dp))
+            StepRow(2, "Eşleştir'e dokun", "Listeden iPhone'u seç.")
+            Spacer(Modifier.height(14.dp))
+            StepRow(3, "PIN kodunu gir", "iPhone ekranındaki 6 haneli kod. Bir kez yeterli.")
+        } else {
+            StepRow(1, "Mac'te Synapse'i aç", "Menü çubuğunda Synapse simgesi görünür.")
+            Spacer(Modifier.height(14.dp))
+            StepRow(2, "Eşleştir'e dokun", "Mac'teki QR kodu tara ya da listeden seç.")
+            Spacer(Modifier.height(14.dp))
+            StepRow(3, "PIN kodunu gir", "Mac ekranındaki 6 haneli kod. Bir kez yeterli.")
+        }
     }
 }

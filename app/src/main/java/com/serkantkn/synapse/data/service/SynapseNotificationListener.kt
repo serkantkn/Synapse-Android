@@ -1,6 +1,7 @@
 package com.serkantkn.synapse.data.service
 
 import android.app.Notification
+import android.app.RemoteInput
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -9,6 +10,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
+import android.os.Bundle
 import android.os.IBinder
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -28,6 +30,38 @@ class SynapseNotificationListener : NotificationListenerService() {
         private const val TAG = "NotifListener"
         private const val PREFS_NAME = "notification_filter_prefs"
         private const val KEY_ALLOWED_PACKAGES = "allowed_packages"
+        private const val MAX_REPLY_ACTIONS = 50
+
+        /** Reply actions of recent notifications, by notification key (insertion ordered). */
+        private val replyActions = object : LinkedHashMap<String, Notification.Action>() {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Notification.Action>?) =
+                size > MAX_REPLY_ACTIONS
+        }
+
+        /**
+         * Answers a notification the way its inline "Reply" box would.
+         * Returns false if the notification is gone or has no reply action.
+         */
+        fun reply(context: Context, key: String, text: String): Boolean {
+            val action = synchronized(replyActions) { replyActions[key] } ?: return false
+            val inputs = action.remoteInputs ?: return false
+            return try {
+                val results = Bundle().apply { inputs.forEach { putCharSequence(it.resultKey, text) } }
+                val fillIn = Intent()
+                RemoteInput.addResultsToIntent(inputs, fillIn, results)
+                action.actionIntent.send(context, 0, fillIn)
+                synchronized(replyActions) { replyActions.remove(key) } // one reply per notification
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "Reply failed", e)
+                false
+            }
+        }
+
+        private fun findReplyAction(notification: Notification): Notification.Action? =
+            notification.actions?.firstOrNull { action ->
+                action.remoteInputs?.any { it.allowFreeFormInput } == true
+            }
     }
 
     private var synapseService: SynapseService? = null
@@ -38,6 +72,8 @@ class SynapseNotificationListener : NotificationListenerService() {
             val binder = service as? SynapseService.SynapseBinder
             synapseService = binder?.getService()
             isBound = true
+            // Notification access may have been granted after the session started.
+            synapseService?.onNotificationAccessReady()
             Log.d(TAG, "Bound to SynapseService")
         }
 
@@ -99,7 +135,10 @@ class SynapseNotificationListener : NotificationListenerService() {
         // Get app icon as Base64
         val iconBase64 = getAppIconBase64(packageName)
 
-        Log.d(TAG, "Forwarding notification: [$appName] $title — $text")
+        val replyAction = findReplyAction(notification)
+        if (replyAction != null) synchronized(replyActions) { replyActions[sbn.key] = replyAction }
+
+        Log.d(TAG, "Forwarding notification from $appName")
 
         // Send to SynapseService
         synapseService?.sendNotification(
@@ -107,8 +146,15 @@ class SynapseNotificationListener : NotificationListenerService() {
             title = title,
             text = text,
             iconBase64 = iconBase64,
-            packageName = packageName
+            packageName = packageName,
+            key = sbn.key,
+            canReply = replyAction != null
         )
+    }
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        sbn ?: return
+        synchronized(replyActions) { replyActions.remove(sbn.key) }
     }
 
     private fun isPackageAllowed(packageName: String): Boolean {
