@@ -57,6 +57,8 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.google.mlkit.barcode.scanning)
+    implementation(libs.kyant.backdrop)
+    implementation(libs.kyant.shapes)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

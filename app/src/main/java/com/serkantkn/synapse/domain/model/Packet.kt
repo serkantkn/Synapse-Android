@@ -6,6 +6,7 @@ package com.serkantkn.synapse.domain.model
 enum class PacketType {
     HANDSHAKE_REQUEST,
     HANDSHAKE_RESPONSE,
+    HANDSHAKE_CONFIRM, // PAKE key confirmation sent to the peer (see Pake.kt)
     CLIPBOARD_TRANSFER,
     HEARTBEAT,
     CALL_EVENT,
@@ -32,7 +33,13 @@ enum class PacketType {
     FILES_REQUEST,
     FILES_RESPONSE,
     FILE_DOWNLOAD_REQ,
-    FILE_DOWNLOAD_RESP
+    FILE_DOWNLOAD_RESP,
+    // Companion features
+    FIND_PHONE,          // Mac -> phone: {action: START|STOP}
+    NOTIFICATION_REPLY,  // Mac -> phone: {key, text}
+    MEDIA_STATE,         // phone -> Mac: now playing
+    MEDIA_COMMAND,       // Mac -> phone: {action}
+    LINK_SHARE           // both ways: {url}
 }
 
 /**

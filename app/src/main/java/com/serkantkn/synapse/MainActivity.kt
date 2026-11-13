@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -113,13 +114,17 @@ class MainActivity : ComponentActivity() {
         // Storage iznini kontrol et ve gerekirse iste
         checkAndRequestStoragePermission()
 
+        // UI screenshots without a peer: adb shell am start ... --es synapse_demo connected
+        val isDebuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        val demoMode = if (isDebuggable) intent?.getStringExtra("synapse_demo") else null
+
         setContent {
             SynapseTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    SynapseNavGraph()
+                    SynapseNavGraph(demoMode = demoMode)
                 }
             }
         }
@@ -128,6 +133,9 @@ class MainActivity : ComponentActivity() {
     private fun checkAndRequestStoragePermission() {
         val permissions = mutableListOf<String>()
         permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+            permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE) // saving files from the Mac
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
         }
@@ -147,6 +155,9 @@ class MainActivity : ComponentActivity() {
     private fun requestStoragePermission() {
         val permissions = mutableListOf<String>()
         permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+            permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE) // saving files from the Mac
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
         }

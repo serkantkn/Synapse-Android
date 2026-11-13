@@ -1,206 +1,172 @@
 package com.serkantkn.synapse.presentation.screens
 
-import androidx.compose.animation.core.*
+import androidx.compose.animation.core.EaseInOutCubic
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Laptop
+import androidx.compose.material.icons.rounded.PhoneIphone
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-
-// Colors
-private val SurfaceDark = Color(0xFF0F1318)
-private val CardDark = Color(0xFF1A1F27)
-private val CardBorder = Color(0xFF2A3040)
-private val Cyan400 = Color(0xFF26C6DA)
-private val Blue500 = Color(0xFF2196F3)
-private val Green400 = Color(0xFF66BB6A)
+import com.kyant.shapes.Capsule
+import com.kyant.shapes.RoundedRectangle
+import com.serkantkn.synapse.ui.glass.GlassCard
+import com.serkantkn.synapse.ui.glass.GlassScaffold
+import com.serkantkn.synapse.ui.glass.GlassTopBar
+import com.serkantkn.synapse.ui.glass.LargeTitle
+import com.serkantkn.synapse.ui.glass.SecondaryText
+import com.serkantkn.synapse.ui.glass.StatusDot
+import com.serkantkn.synapse.ui.glass.SynapseMark
+import com.serkantkn.synapse.ui.glass.glass
+import com.serkantkn.synapse.ui.theme.Apple
+import com.serkantkn.synapse.ui.theme.AppleType
+import com.serkantkn.synapse.ui.theme.SynapseBlue
+import com.serkantkn.synapse.ui.theme.SynapseCyan
 
 enum class TargetPlatform {
     MAC, IOS
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DeviceSelectionScreen(
     onSelectMac: () -> Unit,
     onSelectiOS: () -> Unit,
     nearbyCihaziOSVar: Boolean = false
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 0.95f, targetValue = 1.05f,
-        animationSpec = infiniteRepeatable(tween(1800, easing = EaseInOutCubic), RepeatMode.Reverse),
-        label = "pulse"
-    )
+    val scroll = rememberScrollState()
+    val showTitle = scroll.value > with(LocalDensity.current) { 44.dp.toPx() }
 
-    Scaffold(
-        containerColor = SurfaceDark,
-        topBar = {
-            TopAppBar(
-                title = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(32.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Brush.linearGradient(listOf(Cyan400, Blue500))),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(Icons.Filled.Hub, null, tint = Color.White, modifier = Modifier.size(18.dp))
-                        }
-                        Text("Synapse", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = SurfaceDark)
-            )
-        }
-    ) { padding ->
+    GlassScaffold(topBar = { GlassTopBar(title = "Synapse", showTitle = showTitle) }) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(scroll)
                 .padding(padding)
-                .padding(horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp),
         ) {
-            Spacer(Modifier.height(40.dp))
+            LargeTitle("Synapse")
 
-            // Title
+            Box(Modifier.fillMaxWidth().padding(top = 28.dp, bottom = 24.dp), contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier.size(148.dp).glass(CircleShape, tint = SynapseBlue.copy(alpha = 0.10f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    SynapseMark(size = 76.dp)
+                }
+            }
+
             Text(
-                "Nereye Bağlanmak\nİstiyorsun?",
-                style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
-                color = Color.White,
+                "Nereye bağlanmak istiyorsun?",
+                style = AppleType.title1,
+                color = Apple.colors.label,
                 textAlign = TextAlign.Center,
-                lineHeight = 36.sp
+                modifier = Modifier.fillMaxWidth()
             )
-
             Spacer(Modifier.height(8.dp))
-
-            Text(
-                "Android cihazınızı hangi platform ile senkronize etmek istediğinizi seçin",
-                fontSize = 14.sp,
-                color = Color.White.copy(alpha = 0.5f),
-                textAlign = TextAlign.Center
+            SecondaryText(
+                "Telefonunu hangi cihazla eşitlemek istediğini seç.",
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
             )
 
-            Spacer(Modifier.height(40.dp))
+            Spacer(Modifier.height(28.dp))
 
-            // MacBook option
-            DeviceOptionCard(
-                icon = Icons.Filled.Laptop,
+            PlatformCard(
+                icon = Icons.Rounded.Laptop,
+                colors = listOf(SynapseCyan, SynapseBlue),
                 title = "MacBook",
-                subtitle = "Tam senkronizasyon — Bildirimler, Ekran Yansıtma, Panoya Paylaşım ve daha fazlası",
-                gradientColors = listOf(Cyan400, Blue500),
+                subtitle = "Bildirimler, ekran yansıtma, pano, dosya ve daha fazlası",
                 onClick = onSelectMac
             )
-
-            Spacer(Modifier.height(16.dp))
-
-            // iOS option
-            DeviceOptionCard(
-                icon = Icons.Filled.PhoneIphone,
+            Spacer(Modifier.height(14.dp))
+            PlatformCard(
+                icon = Icons.Rounded.PhoneIphone,
+                colors = listOf(Color(0xFFBF5AF2), Color(0xFFFF375F)),
                 title = "iPhone / iPad",
-                subtitle = "Kişiler, Fotoğraflar ve Dosya paylaşımı",
-                gradientColors = listOf(Color(0xFF7C4DFF), Color(0xFFE040FB)),
+                subtitle = "Kişiler, fotoğraflar ve dosya paylaşımı",
                 onClick = onSelectiOS,
-                badge = if (nearbyCihaziOSVar) "Yakında bir iOS cihaz algılandı" else null,
-                badgePulseScale = pulseScale
+                badge = if (nearbyCihaziOSVar) "Yakında bir iOS cihaz bulundu" else null
             )
-
-            Spacer(Modifier.weight(1f))
         }
     }
 }
 
 @Composable
-private fun DeviceOptionCard(
+private fun PlatformCard(
     icon: ImageVector,
+    colors: List<Color>,
     title: String,
     subtitle: String,
-    gradientColors: List<Color>,
     onClick: () -> Unit,
     badge: String? = null,
-    badgePulseScale: Float = 1f
 ) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        color = CardDark,
-        border = androidx.compose.foundation.BorderStroke(0.5.dp, CardBorder)
-    ) {
-        Column(
-            modifier = Modifier
-                .clickable(onClick = onClick)
-                .padding(24.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(56.dp)
-                        .clip(CircleShape)
-                        .background(Brush.linearGradient(gradientColors.map { it.copy(alpha = 0.2f) })),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(icon, null, tint = gradientColors.first(), modifier = Modifier.size(28.dp))
-                }
-                Spacer(Modifier.width(16.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(title, fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Color.White)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        subtitle,
-                        fontSize = 12.sp,
-                        color = Color.White.copy(alpha = 0.5f),
-                        lineHeight = 16.sp
-                    )
-                }
-                Icon(
-                    Icons.Filled.ChevronRight, null,
-                    tint = Color.White.copy(alpha = 0.3f),
-                    modifier = Modifier.size(24.dp)
-                )
+    GlassCard(onClick = onClick, cornerRadius = 26.dp) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(56.dp)
+                    .background(Brush.linearGradient(colors), RoundedRectangle(16.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(30.dp))
             }
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(title, style = AppleType.title3, color = Apple.colors.label)
+                SecondaryText(subtitle, style = AppleType.footnote)
+            }
+            Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = Apple.colors.tertiaryLabel)
+        }
 
-            // Nearby badge
-            if (badge != null) {
-                Spacer(Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Green400.copy(alpha = 0.1f))
-                        .border(0.5.dp, Green400.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .scale(badgePulseScale)
-                            .clip(CircleShape)
-                            .background(Green400)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(badge, fontSize = 12.sp, color = Green400, fontWeight = FontWeight.SemiBold)
-                }
+        if (badge != null) {
+            val pulse by rememberInfiniteTransition(label = "badge").animateFloat(
+                initialValue = 0.8f, targetValue = 1.2f,
+                animationSpec = infiniteRepeatable(tween(1200, easing = EaseInOutCubic), RepeatMode.Reverse),
+                label = "pulse"
+            )
+            Spacer(Modifier.height(14.dp))
+            Row(
+                Modifier
+                    .background(Apple.colors.green.copy(alpha = 0.14f), Capsule())
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.scale(pulse)) { StatusDot(Apple.colors.green, 7.dp) }
+                Spacer(Modifier.width(8.dp))
+                Text(badge, style = AppleType.footnote, color = Apple.colors.green)
             }
         }
     }

@@ -31,6 +31,22 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.SET_WALLPAPER" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!-- Find my phone -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- Lets media control show the playing app's name (package visibility, Android 11+) -->
+    <queries>
+        <intent>
+            <action android:name="android.media.browse.MediaBrowserService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MEDIA_BUTTON" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="true"
@@ -50,6 +66,21 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Share sheet target: sends a link to the Mac's browser -->
+        <activity
+            android:name=".presentation.share.ShareLinkActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="Mac'te aç"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 

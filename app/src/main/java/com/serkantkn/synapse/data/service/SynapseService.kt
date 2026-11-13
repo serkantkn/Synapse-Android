@@ -31,6 +31,7 @@ import com.serkantkn.synapse.MainActivity
 import com.serkantkn.synapse.R
 import com.serkantkn.synapse.core.util.generatePairingCode
 import com.serkantkn.synapse.data.network.crypto.CryptoManager
+import com.serkantkn.synapse.data.network.crypto.Pake
 import com.serkantkn.synapse.data.network.crypto.PairingTokenStore
 import com.serkantkn.synapse.data.network.nsd.NsdDiscoveryManager
 import com.serkantkn.synapse.data.network.socket.TcpTransferManager
@@ -69,6 +70,9 @@ class SynapseService : Service() {
         private const val KEY_TOKEN_PREFIX = "pairing_token_"
         private const val PROTOCOL_VERSION = 2
         private const val MAX_RECONNECT_ATTEMPTS = 6
+        private const val INBOX_CHANNEL_ID = "synapse_inbox"
+        const val ACTION_SHARE_LINK = "ACTION_SHARE_LINK"
+        const val EXTRA_URL = "url"
     }
 
     // Binder for Activity <-> Service communication
@@ -153,6 +157,13 @@ class SynapseService : Service() {
         }
     }
 
+    // Companion features
+    private val findPhone by lazy { FindPhoneController(this) }
+    private val mediaBridge by lazy {
+        MediaSessionBridge(this) { state -> sendSimplePacket(PacketType.MEDIA_STATE, state) }
+    }
+    private var inboxNotificationId = 2000
+
     private var serverPort: Int = 0
     private var heartbeatJob: Job? = null
     private var discoveryJob: Job? = null
@@ -178,6 +189,9 @@ class SynapseService : Service() {
     // Pairing token per peer, derived from the first PIN-authenticated session. Reconnects prove
     // knowledge of it instead of a PIN; it also feeds the session key, so an impostor using the
     // same device id can't derive the key. Kept Keystore-encrypted, outside plain prefs and backups.
+    /** Contacts, photos and received files the iPhone app can browse. */
+    private val sharedData by lazy { SharedDataProvider(this) }
+
     private val tokenStore by lazy { PairingTokenStore(this).also { migratePlaintextTokens(it) } }
 
     /** Moves tokens written in plaintext by earlier builds into the encrypted store. */
@@ -206,8 +220,17 @@ class SynapseService : Service() {
         prefs.edit().putString("peer_at_$ip:$port", peerId).apply()
     }
 
-    /** Auth mode + secret of the handshake in flight; read on the socket reader thread. */
-    private data class PendingAuth(val mode: String, val secret: ByteArray, val targetId: String)
+    /**
+     * Auth mode + secret of the handshake in flight; read on the socket reader thread.
+     * For a PIN pairing [secret] stays empty until the PAKE key is confirmed ([responderKey] set).
+     */
+    private data class PendingAuth(
+        val mode: String,
+        val secret: ByteArray,
+        val targetId: String,
+        val pake: Pake.Party? = null,
+        val responderKey: String? = null,
+    )
 
     @Volatile
     private var pendingAuth: PendingAuth? = null
@@ -243,7 +266,11 @@ class SynapseService : Service() {
             val theirPublicKeyStr = packet.payload["public_key"] as? String
             val pair = keyPair
             val auth = pendingAuth
-            if (packet.payload["status"] == "ACCEPTED" && !theirPublicKeyStr.isNullOrEmpty() && pair != null && auth != null) {
+            // A PIN pairing only gets a key after a confirmed PAKE, and only for the key it covered.
+            val accepted = packet.payload["status"] == "ACCEPTED"
+            val pakeOk = auth?.mode != Pake.AUTH_MODE || auth?.responderKey == theirPublicKeyStr
+            if (accepted && !pakeOk) Log.e(TAG, "⛔ ACCEPTED without a confirmed PAKE exchange")
+            if (accepted && !theirPublicKeyStr.isNullOrEmpty() && pair != null && auth != null && pakeOk) {
                 try {
                     CryptoManager.deriveSharedSecret(pair.private, CryptoManager.decodePublicKey(theirPublicKeyStr), auth.secret)
                 } catch (e: Exception) {
@@ -337,9 +364,13 @@ class SynapseService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "Service onStartCommand (action: ${intent?.action})")
-        if (intent?.action == "ACTION_DISCONNECT") {
-            disconnect()
-            startDiscovery()
+        when (intent?.action) {
+            "ACTION_DISCONNECT" -> {
+                disconnect()
+                startDiscovery()
+            }
+            FindPhoneController.ACTION_STOP -> findPhone.stop()
+            ACTION_SHARE_LINK -> intent.getStringExtra(EXTRA_URL)?.let { shareLinkToMac(it) }
         }
         return START_STICKY
     }
@@ -351,6 +382,8 @@ class SynapseService : Service() {
         callReceiver?.let { unregisterReceiver(it) }
         smsReceiver?.let { unregisterReceiver(it) }
         stopHeartbeat()
+        findPhone.stop()
+        mediaBridge.stop()
         releaseWakeLock()
         clipboardHandler.removeCallbacks(clipboardRunnable)
         clipboardManager.removePrimaryClipChangedListener(clipboardListener)
@@ -420,11 +453,41 @@ class SynapseService : Service() {
 
     // MARK: - Discovery
 
-    fun setTargetServiceType(type: String) {
+    /**
+     * The user picked a platform: search for it. Discovery doesn't start before this, so a
+     * paired peer of the other platform isn't auto-reconnected behind the selection screen.
+     */
+    fun selectTargetServiceType(type: String) {
+        setTargetServiceType(type)
+        when (connectionStatus.value) {
+            ConnectionStatus.DISCONNECTED, ConnectionStatus.ERROR -> startDiscovery()
+            else -> Unit // already searching for this type, pairing, or connected
+        }
+    }
+
+    private fun setTargetServiceType(type: String) {
+        if (discoveryManager.serviceType == type) return
         discoveryManager.serviceType = type
+        discoveredDevices.value = emptyList()
+        // Whatever is running belongs to the other platform (e.g. a session kept alive in the
+        // background from an earlier pick). Restart it for the new one.
+        when (connectionStatus.value) {
+            ConnectionStatus.CONNECTED, ConnectionStatus.PAIRING -> {
+                disconnect()
+                startDiscovery()
+            }
+            ConnectionStatus.DISCOVERING -> startDiscovery()
+            ConnectionStatus.DISCONNECTED, ConnectionStatus.ERROR -> Unit // the next search uses it
+        }
     }
 
     fun startDiscovery() {
+        // The UI calls this whenever it (re)binds; it must not knock a live session back to
+        // DISCOVERING, or every packet from the peer would be dropped as "not connected".
+        if (connectionStatus.value == ConnectionStatus.CONNECTED) {
+            Log.d(TAG, "Discovery skipped: already connected")
+            return
+        }
         serviceScope.launch {
             try {
                 connectionStatus.value = ConnectionStatus.DISCOVERING
@@ -479,7 +542,11 @@ class SynapseService : Service() {
                 errorMessage.value = null
                 updateNotification("Eşleşme: ${device.name}...")
 
-                // Known peer → prove the stored token; otherwise prove the PIN shown on the peer.
+                // Fresh ephemeral key pair per session (forward secrecy across sessions).
+                val pair = CryptoManager.generateKeyPair()
+                val publicKeyStr = CryptoManager.encodePublicKey(pair.public)
+
+                // Known peer → prove the stored token; otherwise run a PAKE on the PIN shown on the peer.
                 val peerId = if (getPairingToken(device.id) != null) device.id
                     else peerIdForAddress(device.ipAddress, device.port) ?: device.id
                 val token = getPairingToken(peerId)
@@ -492,31 +559,32 @@ class SynapseService : Service() {
                         connectionStatus.value = ConnectionStatus.ERROR
                         return@launch
                     }
-                    PendingAuth(CryptoManager.AUTH_MODE_PIN, pin.toByteArray(Charsets.UTF_8), device.id)
+                    PendingAuth(Pake.AUTH_MODE, ByteArray(0), device.id, pake = Pake.Party(Pake.ROLE_INITIATOR, pin, publicKeyStr))
                 }
-
-                // Fresh ephemeral key pair per session (forward secrecy across sessions).
-                val pair = CryptoManager.generateKeyPair()
                 keyPair = pair
                 pendingAuth = auth
 
                 transferManager.connectTo(device.ipAddress, device.port)
 
-                val publicKeyStr = CryptoManager.encodePublicKey(pair.public)
+                val payload = mutableMapOf<String, Any?>(
+                    "device_name" to android.os.Build.MODEL,
+                    "device_type" to "android",
+                    "public_key" to publicKeyStr,
+                    "protocol" to PROTOCOL_VERSION,
+                    "auth_mode" to auth.mode,
+                )
+                if (auth.pake != null) {
+                    // The PIN never leaves the phone, not even as a hash: only our PAKE share does.
+                    payload["pake_share"] = java.util.Base64.getEncoder().encodeToString(auth.pake.share)
+                } else {
+                    payload["auth_proof"] = CryptoManager.authProof(auth.secret, auth.mode, publicKeyStr)
+                }
                 val handshakePacket = Packet(
                     packetId = UUID.randomUUID().toString(),
                     type = PacketType.HANDSHAKE_REQUEST,
                     senderId = discoveryManager.getDeviceId(),
                     timestamp = System.currentTimeMillis(),
-                    payload = mapOf(
-                        "device_name" to android.os.Build.MODEL,
-                        "device_type" to "android",
-                        "public_key" to publicKeyStr,
-                        "protocol" to PROTOCOL_VERSION,
-                        "auth_mode" to auth.mode,
-                        // The PIN itself is never sent; only an HMAC bound to our ephemeral key.
-                        "auth_proof" to CryptoManager.authProof(auth.secret, auth.mode, publicKeyStr)
-                    )
+                    payload = payload
                 )
                 transferManager.sendPacket(handshakePacket, encrypt = false)
                 connectedDevice.value = device
@@ -538,6 +606,57 @@ class SynapseService : Service() {
                 pendingAuth = null
                 errorMessage.value = "Eşleşme hatası: ${e.message}"
                 connectionStatus.value = ConnectionStatus.ERROR
+            }
+        }
+    }
+
+    /**
+     * PAKE message 2 → 3: check the peer's confirmation, then send ours (see [Pake]).
+     * Runs on the main thread; the session key itself is installed when ACCEPTED arrives.
+     */
+    private suspend fun answerPakeChallenge(packet: Packet, auth: PendingAuth?) {
+        val party = auth?.pake
+        val responderKey = packet.payload["public_key"] as? String
+        val decoder = java.util.Base64.getDecoder()
+        val share = (packet.payload["pake_share"] as? String)?.let { runCatching { decoder.decode(it) }.getOrNull() }
+        val confirmation = (packet.payload["pake_confirm"] as? String)?.let { runCatching { decoder.decode(it) }.getOrNull() }
+        val key = if (auth != null && party != null && auth.responderKey == null && !responderKey.isNullOrEmpty() && share != null) {
+            runCatching { party.sharedKey(share, responderKey) }.getOrNull()
+        } else null
+        if (auth == null || key == null || responderKey == null || confirmation == null) {
+            Log.e(TAG, "❌ Unusable PAKE challenge, dropping")
+            pendingAuth = null
+            disconnect()
+            errorMessage.value = "Güvenli bağlantı kurulamadı"
+            return
+        }
+
+        val matches = Pake.verifyConfirmation(confirmation, key, Pake.ROLE_RESPONDER)
+        // Only a matching exchange may complete. On a mismatch our confirmation still goes out,
+        // so the peer can report the wrong PIN too, but no session key will be accepted.
+        val next = if (matches) auth.copy(secret = key, responderKey = responderKey) else auth.copy(pake = null)
+        pendingAuth = next // set before sending: the peer's ACCEPTED can only follow our confirmation
+        transferManager.sendPacket(
+            Packet(
+                packetId = UUID.randomUUID().toString(),
+                type = PacketType.HANDSHAKE_CONFIRM,
+                senderId = discoveryManager.getDeviceId(),
+                timestamp = System.currentTimeMillis(),
+                payload = mapOf("pake_confirm" to java.util.Base64.getEncoder().encodeToString(Pake.confirmation(key, Pake.ROLE_INITIATOR)))
+            ),
+            encrypt = false
+        )
+        if (!matches) {
+            Log.w(TAG, "⛔ PAKE confirmation mismatch: wrong PIN")
+            serviceScope.launch {
+                // The peer normally answers BAD_PIN right away; don't wait on one that doesn't.
+                delay(3_000)
+                if (pendingAuth === next) {
+                    pendingAuth = null
+                    disconnect()
+                    errorMessage.value = "PIN kodu hatalı"
+                    updateNotification("Eşleşme reddedildi")
+                }
             }
         }
     }
@@ -626,6 +745,10 @@ class SynapseService : Service() {
                         }
                         val status = packet.payload["status"] as? String
                         val auth = pendingAuth
+                        if (status == "CHALLENGE") {
+                            answerPakeChallenge(packet, auth)
+                            return@collect
+                        }
                         val sessionKey = transferManager.encryptionKey
                         if (status == "ACCEPTED" && (sessionKey == null || auth == null)) {
                             // "Accepted" without a usable key would mean a plaintext session: refuse it.
@@ -643,7 +766,7 @@ class SynapseService : Service() {
                             
                             // Persist this device as known; a PIN pairing yields the long-term token.
                             saveKnownDevice(packet.senderId)
-                            if (auth.mode == CryptoManager.AUTH_MODE_PIN) {
+                            if (auth.mode == Pake.AUTH_MODE) {
                                 savePairingToken(packet.senderId, CryptoManager.deriveDeviceToken(sessionKey))
                             }
                             connectedDevice.value?.let { savePeerIdForAddress(it.ipAddress, it.port, packet.senderId) }
@@ -653,6 +776,7 @@ class SynapseService : Service() {
                             startHeartbeat()
                             sendWallpaper()
                             registerWallpaperChangeListener()
+                            if (isMacSession()) mediaBridge.start()
                         } else {
                             val reasonCode = packet.payload["reason_code"] as? String
                             if (auth?.mode == CryptoManager.AUTH_MODE_TOKEN) {
@@ -721,29 +845,69 @@ class SynapseService : Service() {
                         val fileName = sanitizeFileName(packet.payload["file_name"] as? String)
                         val fileDataB64 = packet.payload["file_data"] as? String
                         if (fileDataB64 != null) {
-                            try {
-                                val bytes = android.util.Base64.decode(fileDataB64, android.util.Base64.DEFAULT)
-                                val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-                                val synapseDir = java.io.File(downloadsDir, "Synapse")
-                                if (!synapseDir.exists()) synapseDir.mkdirs()
-                                
-                                val file = uniqueFile(synapseDir, fileName)
-                                // Defense in depth: the resolved path must stay inside Downloads/Synapse.
-                                if (file.canonicalFile.parentFile != synapseDir.canonicalFile) {
-                                    Log.e(TAG, "⛔ Refusing to write outside the Synapse folder")
-                                    return@collect
-                                }
-                                java.io.FileOutputStream(file).use { it.write(bytes) }
-                                
-                                updateNotification("Dosya alındı: ${file.name}")
-                                Log.d(TAG, "File saved successfully: ${file.absolutePath}")
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error saving file: ${e.message}")
-                            }
+                            withContext(Dispatchers.IO) { saveIncomingFile(fileName, fileDataB64) }
                         }
+                    }
+                    PacketType.FIND_PHONE -> {
+                        when (packet.payload["action"] as? String) {
+                            "STOP" -> findPhone.stop()
+                            else -> findPhone.start()
+                        }
+                    }
+                    PacketType.NOTIFICATION_REPLY -> {
+                        val key = packet.payload["key"] as? String
+                        val text = (packet.payload["text"] as? String)?.trim()
+                        if (key != null && !text.isNullOrEmpty()) {
+                            val ok = SynapseNotificationListener.reply(this@SynapseService, key, text)
+                            Log.d(TAG, "Notification reply ${if (ok) "sent" else "failed"}")
+                            sendSimplePacket(
+                                PacketType.NOTIFICATION_REPLY,
+                                mapOf("key" to key, "status" to if (ok) "SENT" else "FAILED")
+                            )
+                        }
+                    }
+                    PacketType.MEDIA_COMMAND -> {
+                        when (val action = packet.payload["action"] as? String) {
+                            null -> {}
+                            "REFRESH" -> mediaBridge.resend()
+                            else -> mediaBridge.handleCommand(action)
+                        }
+                    }
+                    PacketType.LINK_SHARE -> {
+                        val url = packet.payload["url"] as? String
+                        if (url != null && isWebUrl(url)) showIncomingLink(url)
+                        else Log.w(TAG, "⛔ Ignoring non-web link")
                     }
                     PacketType.PHOTO_LIBRARY_REQ -> {
                         fetchPhotoLibraryThumbnails()
+                    }
+                    // Requests from the iPhone app's Kişiler / Fotoğraflar / Dosyalar tabs.
+                    PacketType.CONTACTS_REQUEST -> answerFromIo(PacketType.CONTACTS_RESPONSE) {
+                        val contacts = sharedData.contacts()
+                        if (contacts == null) mapOf("contacts" to emptyList<Any>(), "error" to "PERMISSION_DENIED")
+                        else mapOf("contacts" to contacts)
+                    }
+                    PacketType.PHOTOS_REQUEST -> answerFromIo(PacketType.PHOTOS_RESPONSE) {
+                        mapOf("photos" to sharedData.photos())
+                    }
+                    PacketType.FILES_REQUEST -> answerFromIo(PacketType.FILES_RESPONSE) {
+                        mapOf("files" to sharedData.files())
+                    }
+                    PacketType.FILE_DOWNLOAD_REQ -> {
+                        val path = packet.payload["file_path"] as? String
+                        if (path != null) answerFromIo(PacketType.FILE_DOWNLOAD_RESP) {
+                            when (val file = sharedData.file(path)) {
+                                is SharedDataProvider.FileResult.Data -> mapOf(
+                                    "file_name" to file.name,
+                                    "data" to android.util.Base64.encodeToString(file.bytes, android.util.Base64.NO_WRAP)
+                                )
+                                // Too big for one frame: say so instead of breaking the connection.
+                                is SharedDataProvider.FileResult.TooLarge -> mapOf(
+                                    "file_name" to file.name, "size" to file.size, "error" to "TOO_LARGE"
+                                )
+                                SharedDataProvider.FileResult.NotFound -> mapOf("file_path" to path, "error" to "NOT_FOUND")
+                            }
+                        }
                     }
                     PacketType.PHOTO_DOWNLOAD_REQ -> {
                         val photoId = packet.payload["photo_id"] as? String
@@ -868,7 +1032,15 @@ class SynapseService : Service() {
 
     // MARK: - Notification Forwarding
 
-    fun sendNotification(appName: String, title: String, text: String, iconBase64: String, packageName: String) {
+    fun sendNotification(
+        appName: String,
+        title: String,
+        text: String,
+        iconBase64: String,
+        packageName: String,
+        key: String = "",
+        canReply: Boolean = false,
+    ) {
         if (connectionStatus.value != ConnectionStatus.CONNECTED) return
 
         serviceScope.launch {
@@ -883,7 +1055,9 @@ class SynapseService : Service() {
                         "title" to title,
                         "text" to text,
                         "icon" to iconBase64,
-                        "package_name" to packageName
+                        "package_name" to packageName,
+                        "key" to key,
+                        "can_reply" to canReply
                     )
                 )
                 transferManager.sendPacket(packet)
@@ -897,6 +1071,8 @@ class SynapseService : Service() {
     // MARK: - Heartbeat
 
     fun sendWallpaper() {
+        // Only the Mac shows the phone's wallpaper; the iOS app can't decode this packet.
+        if (!isMacSession()) return
         serviceScope.launch(Dispatchers.IO) {
             try {
                 Log.d(TAG, "🖼️ sendWallpaper() called, attempting to fetch wallpaper...")
@@ -1317,6 +1493,26 @@ class SynapseService : Service() {
         }
     }
 
+    /** Builds a response off the main thread (queries, file reads) and sends it. */
+    private fun answerFromIo(type: PacketType, build: () -> Map<String, Any?>) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val payload = build()
+                transferManager.sendPacket(
+                    Packet(
+                        packetId = UUID.randomUUID().toString(),
+                        type = type,
+                        senderId = discoveryManager.getDeviceId(),
+                        timestamp = System.currentTimeMillis(),
+                        payload = payload
+                    )
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to answer with $type", e)
+            }
+        }
+    }
+
     private fun handlePhotoDownloadRequest(photoId: String) {
         serviceScope.launch(Dispatchers.IO) {
             try {
@@ -1324,30 +1520,24 @@ class SynapseService : Service() {
                 val uri = android.content.ContentUris.withAppendedId(
                     android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id
                 )
-                
-                contentResolver.openInputStream(uri)?.use { stream ->
-                    val bytes = stream.readBytes()
-                    val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    if (bitmap != null) {
-                        val outStream = java.io.ByteArrayOutputStream()
-                        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, outStream)
-                        val compressedBytes = outStream.toByteArray()
-                        val base64Data = android.util.Base64.encodeToString(compressedBytes, android.util.Base64.NO_WRAP)
-                        bitmap.recycle()
-                        
-                        val packet = Packet(
-                            packetId = UUID.randomUUID().toString(),
-                            type = PacketType.PHOTO_DOWNLOAD_RESP,
-                            senderId = discoveryManager.getDeviceId(),
-                            timestamp = System.currentTimeMillis(),
-                            payload = mapOf(
-                                "photo_id" to photoId,
-                                "data" to base64Data
-                            )
-                        )
-                        transferManager.sendPacket(packet)
-                    }
+                // Full resolution when it fits; scaled down when it would exceed the peer's
+                // frame limit (which closes the connection instead of downloading).
+                val jpeg = sharedData.photoForTransfer(uri)
+                if (jpeg == null) {
+                    Log.e(TAG, "Photo $photoId could not be prepared for transfer")
+                    return@launch
                 }
+                val packet = Packet(
+                    packetId = UUID.randomUUID().toString(),
+                    type = PacketType.PHOTO_DOWNLOAD_RESP,
+                    senderId = discoveryManager.getDeviceId(),
+                    timestamp = System.currentTimeMillis(),
+                    payload = mapOf(
+                        "photo_id" to photoId,
+                        "data" to android.util.Base64.encodeToString(jpeg, android.util.Base64.NO_WRAP)
+                    )
+                )
+                transferManager.sendPacket(packet)
             } catch (e: Exception) {
                 Log.e(TAG, "Error downloading photo $photoId", e)
             }
@@ -1365,7 +1555,26 @@ class SynapseService : Service() {
                     contentResolver.delete(uri, null, null)
                     Log.d(TAG, "Deleted photo $photoId successfully from MediaStore.")
                 } catch (e: SecurityException) {
-                    Log.e(TAG, "SecurityException deleting photo: ${e.message}")
+                    // Since Android 10 deleting another app's photo (the camera's) needs the
+                    // user's consent. Android blocks dialogs from the background, so ask through
+                    // a notification whose tap opens the system's delete confirmation.
+                    val consent = when {
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                            android.provider.MediaStore.createDeleteRequest(contentResolver, listOf(uri))
+                        Build.VERSION.SDK_INT == Build.VERSION_CODES.Q && e is android.app.RecoverableSecurityException ->
+                            e.userAction.actionIntent
+                        else -> null
+                    }
+                    if (consent != null) {
+                        Log.d(TAG, "Photo $photoId needs delete consent; asking via notification")
+                        postInboxNotification(
+                            "Fotoğrafı silmek için onay gerekiyor",
+                            "Mac bu fotoğrafı silmek istiyor. Onaylamak için dokunun.",
+                            consent
+                        )
+                    } else {
+                        Log.e(TAG, "SecurityException deleting photo: ${e.message}")
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error deleting photo $photoId", e)
@@ -1375,10 +1584,148 @@ class SynapseService : Service() {
 
 
 
+    // MARK: - Companion features
+
+    private fun sendSimplePacket(type: PacketType, payload: Map<String, Any?>) {
+        if (connectionStatus.value != ConnectionStatus.CONNECTED) return
+        serviceScope.launch {
+            try {
+                transferManager.sendPacket(
+                    Packet(
+                        packetId = UUID.randomUUID().toString(),
+                        type = type,
+                        senderId = discoveryManager.getDeviceId(),
+                        timestamp = System.currentTimeMillis(),
+                        payload = payload
+                    )
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send $type", e)
+            }
+        }
+    }
+
+    private fun isWebUrl(url: String): Boolean {
+        val scheme = Uri.parse(url).scheme?.lowercase()
+        return (scheme == "http" || scheme == "https") && url.length <= 4096
+    }
+
+    /** The notification listener is live: media sessions are readable now. */
+    fun onNotificationAccessReady() {
+        if (connectionStatus.value == ConnectionStatus.CONNECTED && isMacSession()) mediaBridge.start()
+    }
+
+    /** Media control is a Mac feature; the iOS app doesn't understand MEDIA_STATE. */
+    private fun isMacSession() = !discoveryManager.serviceType.contains("_ios")
+
+    /** Called from the share sheet (ShareLinkActivity). */
+    private fun shareLinkToMac(url: String) {
+        if (!isWebUrl(url)) return
+        if (connectionStatus.value != ConnectionStatus.CONNECTED) {
+            android.widget.Toast.makeText(this, "Mac'e bağlı değil", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        sendSimplePacket(PacketType.LINK_SHARE, mapOf("url" to url))
+        android.widget.Toast.makeText(this, "Link Mac'te açılıyor", android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    private fun ensureInboxChannel() {
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(INBOX_CHANNEL_ID, "Mac'ten gelenler", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Mac'ten gönderilen linkler ve dosyalar"
+            }
+        )
+    }
+
+    private fun postInboxNotification(title: String, text: String, open: Intent) {
+        val id = inboxNotificationId++
+        val pending = PendingIntent.getActivity(
+            this, id, open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        postInboxNotification(title, text, pending, id)
+    }
+
+    private fun postInboxNotification(title: String, text: String, pending: PendingIntent, id: Int = inboxNotificationId++) {
+        ensureInboxChannel()
+        val notification = NotificationCompat.Builder(this, INBOX_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(pending)
+            .setAutoCancel(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(id, notification)
+    }
+
+    /** Android blocks opening activities from the background, so the link arrives as a tap-to-open notification. */
+    private fun showIncomingLink(url: String) {
+        postInboxNotification("Mac'ten link", url, Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }
+
+    /** Saves a file sent from the Mac into Downloads/Synapse without overwriting anything. */
+    private fun saveIncomingFile(fileName: String, dataB64: String) {
+        try {
+            val bytes = Base64.decode(dataB64, Base64.DEFAULT)
+            val mime = android.webkit.MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(fileName.substringAfterLast('.', "").lowercase())
+                ?: "application/octet-stream"
+
+            val savedName: String
+            val openUri: Uri?
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime)
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/Synapse")
+                    put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                val resolver = contentResolver
+                val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: throw java.io.IOException("MediaStore insert failed")
+                resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: throw java.io.IOException("No output stream")
+                values.clear()
+                values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+                // MediaStore renames on clashes ("name (1).ext"); show what it actually stored.
+                savedName = resolver.query(uri, arrayOf(android.provider.MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { c -> if (c.moveToFirst()) c.getString(0) else null } ?: fileName
+                openUri = uri
+            } else {
+                @Suppress("DEPRECATION")
+                val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                val synapseDir = java.io.File(downloadsDir, "Synapse")
+                if (!synapseDir.exists()) synapseDir.mkdirs()
+                val file = uniqueFile(synapseDir, fileName)
+                // Defense in depth: the resolved path must stay inside Downloads/Synapse.
+                if (file.canonicalFile.parentFile != synapseDir.canonicalFile) {
+                    Log.e(TAG, "⛔ Refusing to write outside the Synapse folder")
+                    return
+                }
+                java.io.FileOutputStream(file).use { it.write(bytes) }
+                savedName = file.name
+                openUri = null
+            }
+
+            Log.d(TAG, "File saved: $savedName (${bytes.size} bytes)")
+            val open = if (openUri != null) {
+                Intent(Intent.ACTION_VIEW).setDataAndType(openUri, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } else {
+                Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS)
+            }
+            serviceScope.launch { postInboxNotification("Mac'ten dosya alındı", "$savedName — İndirilenler/Synapse", open) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving file: ${e.message}")
+        }
+    }
+
     // MARK: - Disconnect
 
     fun disconnect() {
         if (mediaProjection != null) onProjectionStopped() else releaseScreenCapture()
+        mediaBridge.stop()
 
         clipboardHandler.removeCallbacks(clipboardRunnable)
         stopHeartbeat()

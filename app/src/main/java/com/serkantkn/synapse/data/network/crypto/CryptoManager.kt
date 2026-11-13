@@ -44,12 +44,13 @@ object CryptoManager {
     private const val PROOF_PREFIX = "synapse-auth-v1:"
     private const val DEVICE_TOKEN_LABEL = "synapse-device-token-v1"
 
-    const val AUTH_MODE_PIN = "pin"
+    /** Reconnect with the stored device token. First pairings use [Pake.AUTH_MODE] instead. */
     const val AUTH_MODE_TOKEN = "token"
 
     /**
-     * Proof that the initiator knows [authSecret], bound to its ephemeral public key so a
-     * captured proof can't be replayed with a different key pair.
+     * Proof that the initiator knows the device token [authSecret], bound to its ephemeral public
+     * key so a captured proof can't be replayed with a different key pair. Only for the token:
+     * it is high-entropy, unlike a PIN, which would fall to an offline search (hence [Pake]).
      * Base64(HMAC-SHA256(authSecret, "synapse-auth-v1:<mode>:<publicKeyBase64>")).
      */
     fun authProof(authSecret: ByteArray, mode: String, publicKeyBase64: String): String {
@@ -57,7 +58,7 @@ object CryptoManager {
         return Base64.getEncoder().encodeToString(hmacSha256(authSecret, msg))
     }
 
-    /** Long-term pairing token both sides derive from the first PIN-authenticated session key. */
+    /** Long-term pairing token both sides derive from the first PAKE-authenticated session key. */
     fun deriveDeviceToken(sessionKey: SecretKey): String =
         Base64.getEncoder().encodeToString(
             hmacSha256(sessionKey.encoded, DEVICE_TOKEN_LABEL.toByteArray(Charsets.UTF_8))
@@ -124,7 +125,7 @@ object CryptoManager {
      * Uses the same parameters as macOS CryptoKit's hkdfDerivedSymmetricKey:
      * - Hash: SHA-256
      * - Salt: "SynapseEncryption"
-     * - Info: "synapse-session-v1:" + authSecret (the PIN bytes or the stored device token),
+     * - Info: "synapse-session-v1:" + authSecret (the PAKE key or the stored device token),
      *   so a peer that doesn't know the PIN/token derives a different key and can't talk to us.
      * - Output: 32 bytes (256-bit AES key)
      */

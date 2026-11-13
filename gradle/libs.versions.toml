@@ -13,6 +13,8 @@ navigationCompose = "2.9.0"
 lifecycleViewmodelCompose = "2.10.0"
 camerax = "1.6.2"
 barcodeScanning = "17.3.0"
+backdrop = "1.0.6"
+kyantShapes = "1.2.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -38,6 +40,8 @@ androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", 
 androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camerax" }
 google-mlkit-barcode-scanning = { group = "com.google.mlkit", name = "barcode-scanning", version.ref = "barcodeScanning" }
+kyant-backdrop = { group = "io.github.kyant0", name = "backdrop", version.ref = "backdrop" }
+kyant-shapes = { group = "io.github.kyant0", name = "shapes", version.ref = "kyantShapes" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
